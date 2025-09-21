@@ -1,0 +1,67 @@
+ci:
+  autofix_prs: false
+
+minimum_pre_commit_version: '3.6.0'
+
+# Keep runs fast and deterministic; skip common build/cache/vendor dirs
+exclude: |
+  (?x)(
+    ^(node_modules|vendor|dist|build|\.venv|\.tox|\.mypy_cache|\.ruff_cache|\.git|\.idea|\.vscode|coverage|\.pytest_cache|\.terraform|target|\.eggs|eggs-info|site-packages)/
+  )
+
+default_stages: [commit]
+default_language_version:
+  python: python3
+
+repos:
+  # Core hygiene
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.6.0
+    hooks:
+      - id: check-added-large-files
+        args: ["--maxkb=1024"]
+      - id: check-merge-conflict
+      - id: check-case-conflict
+      - id: end-of-file-fixer
+      - id: trailing-whitespace
+        args: ["--markdown-linebreak-ext=md"]
+      - id: mixed-line-ending
+        args: ["--fix=lf"]
+      - id: check-yaml
+      - id: check-toml
+      - id: check-json
+
+  # Python linting (plus simple autofixes)
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.5.7
+    hooks:
+      - id: ruff
+        args: ["--fix", "--exit-non-zero-on-fix"]
+
+  # Python formatting
+  - repo: https://github.com/psf/black
+    rev: 24.8.0
+    hooks:
+      - id: black
+
+  # Shell formatting
+  - repo: https://github.com/scop/pre-commit-shfmt
+    rev: v3.8.0
+    hooks:
+      - id: shfmt
+        args: ["-i", "2", "-ci"]
+
+  # Shell linting
+  - repo: https://github.com/pre-commit/mirrors-shellcheck
+    rev: v0.10.0
+    hooks:
+      - id: shellcheck
+
+  # Secrets scanning (kept to commit stage; uses repo baseline)
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.5.0
+    hooks:
+      - id: detect-secrets
+        args: ["--baseline", ".secrets.baseline"]
+        stages: [commit]
+
