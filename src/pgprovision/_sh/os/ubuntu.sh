@@ -2,19 +2,21 @@
 # Ubuntu 22.04/24.04 + PGDG helpers
 set -Eeuo pipefail
 
+: "${PG_VERSION:=16}"
+
 _apt_update_once_done="false"
 _cnf_hook="/etc/apt/apt.conf.d/50command-not-found"
 
 _disable_cnf_hook() {
   if [[ -f "${_cnf_hook}" ]]; then
-    run mv -f "${_cnf_hook}" "${_cnf_hook}.bak.airules" || true
+    run mv -f "${_cnf_hook}" "${_cnf_hook}.bak.pgprov" || true
     echo "+ disabled command-not-found APT hook"
   fi
 }
 
 _restore_cnf_hook() {
-  if [[ -f "${_cnf_hook}.bak.airules" ]]; then
-    run mv -f "${_cnf_hook}.bak.airules" "${_cnf_hook}" || true
+  if [[ -f "${_cnf_hook}.bak.pgprov" ]]; then
+    run mv -f "${_cnf_hook}.bak.pgprov" "${_cnf_hook}" || true
     echo "+ restored command-not-found APT hook"
   fi
 }
@@ -43,38 +45,38 @@ os_prepare_repos() {
 
 os_install_packages() {
   _apt_update_once
-  run apt-get install -y postgresql-16 postgresql-client-16 postgresql-contrib
+  run apt-get install -y postgresql-${PG_VERSION} postgresql-client-${PG_VERSION} postgresql-contrib
 }
 
 os_init_cluster() {
   local data_dir="${1:-auto}"
-  # Ubuntu auto-creates 16 cluster when postgresql-16 is installed via PGDG.
+  # Ubuntu auto-creates 16 cluster when postgresql-${PG_VERSION} is installed via PGDG.
   # Custom data dir requires cluster tooling; enforce availability and success.
   if [[ "$data_dir" != "auto" && -n "$data_dir" ]]; then
     if ! command -v pg_dropcluster >/dev/null 2>&1 || ! command -v pg_createcluster >/dev/null 2>&1; then
       err "pg_dropcluster/pg_createcluster not available; cannot relocate data dir to ${data_dir}"
       exit 2
     fi
-    if systemctl is-active --quiet postgresql@16-main; then run systemctl stop postgresql@16-main; fi
+    if systemctl is-active --quiet postgresql@${PG_VERSION}-main; then run systemctl stop postgresql@${PG_VERSION}-main; fi
     run pg_dropcluster --stop 16 main
     run install -d -m 0700 "$data_dir"
     ubuntu_apparmor_allow_datadir "$data_dir" || true  # defensive: non-fatal on systems without AppArmor
     run pg_createcluster 16 main -d "$data_dir"
   fi
-  run systemctl enable --now postgresql@16-main
+  run systemctl enable --now postgresql@${PG_VERSION}-main
 }
 
 os_get_paths() {
-  echo "CONF_FILE=/etc/postgresql/16/main/postgresql.conf HBA_FILE=/etc/postgresql/16/main/pg_hba.conf IDENT_FILE=/etc/postgresql/16/main/pg_ident.conf DATA_DIR=/var/lib/postgresql/16/main SERVICE=postgresql@16-main"
+  echo "CONF_FILE=/etc/postgresql/${PG_VERSION}/main/postgresql.conf HBA_FILE=/etc/postgresql/${PG_VERSION}/main/pg_hba.conf IDENT_FILE=/etc/postgresql/${PG_VERSION}/main/pg_ident.conf DATA_DIR=/var/lib/postgresql/${PG_VERSION}/main SERVICE=postgresql@${PG_VERSION}-main"
 }
 
 os_enable_and_start() {
-  local svc="${1:-postgresql@16-main}"
+  local svc="${1:-postgresql@${PG_VERSION}-main}"
   run systemctl enable --now "$svc"
 }
 
 os_restart() {
-  local svc="${1:-postgresql@16-main}"
+  local svc="${1:-postgresql@${PG_VERSION}-main}"
   run systemctl restart "$svc"
 }
 

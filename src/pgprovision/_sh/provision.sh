@@ -2,57 +2,68 @@
 set -Eeuo pipefail
 umask 077
 
-# Minimal shared helpers (inlined; previously from lib/common.sh)
-_c_green="\033[0;32m"; _c_yellow="\033[0;33m"; _c_red="\033[0;31m"; _c_reset="\033[0m" || true
-log() { echo -e "${_c_green}[airules:pg]${_c_reset} $*"; }
-warn() { echo -e "${_c_yellow}[airules:pg][warn]${_c_reset} $*" 1>&2; }
-err()  { echo -e "${_c_red}[airules:pg][error]${_c_reset} $*" 1>&2; }
-run() { echo "+ $*"; "$@"; }
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# shellcheck source=src/pgprovision/_sh/lib/common.sh
+. "${SCRIPT_DIR}/lib/common.sh"
+
+# shellcheck source=src/pgprovision/_sh/lib/hba.sh
+. "${SCRIPT_DIR}/lib/hba.sh"
+
 require_root_or_sudo() {
   if [[ $(id -u) -eq 0 ]]; then return 0; fi
   if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then return 0; fi
   err "This script needs root or passwordless sudo (sudo -n)."
   exit 1
 }
-os_detect() {
-  if [[ -r /etc/os-release ]]; then
-    . /etc/os-release
-    case "${ID:-}" in
-      rhel|rocky|almalinux|centos) OS_FAMILY="rhel" ;;
-      ubuntu) OS_FAMILY="ubuntu" ;;
-      *) err "Unsupported OS ID: ${ID:-unknown}"; exit 2 ;;
-    esac
-    OS_VERSION_ID="${VERSION_ID:-}"; OS_CODENAME="${UBUNTU_CODENAME:-}"
-  else
-    err "/etc/os-release not found; cannot detect OS"; exit 2
-  fi
+
+readonly -a RHEL_IDS=(rhel rocky almalinux centos ol oraclelinux amzn fedora redhat)
+readonly -a DEB_IDS=(ubuntu debian linuxmint pop neon zorin raspbian kali elementary)
+
+# Match any whole-word token in $1 against the remaining args.
+# Uses the " space $hay space " trick for word boundaries; RHEL7-safe (no declare -n).
+has_any_token() {
+  local hay=" $1 " t
+  shift
+  for t in "$@"; do
+    [[ "$hay" == *" $t "* ]] && return 0
+  done
+  return 1
 }
-ensure_hba_rule() {
-  local f="$1"; shift; local rule="$*"; touch "$f"
-  if ! grep -Fqx -- "$rule" "$f" 2>/dev/null; then
-    echo "$rule" >>"$f"
+
+os_detect() {
+  local osrel="${OS_RELEASE_PATH:-/etc/os-release}"
+  [[ -r "$osrel" ]] || { err "$osrel not found"; exit 2; }
+  # shellcheck disable=SC1091
+  . "$osrel"
+
+  OS_VERSION_ID="${VERSION_ID:-}"
+  OS_CODENAME="${UBUNTU_CODENAME:-${VERSION_CODENAME:-}}"
+
+  # Consider both ID and ID_LIKE in one pass (derivatives covered without OR chains)
+  local tokens="${ID:-} ${ID_LIKE:-}"
+  if   has_any_token "$tokens" "${RHEL_IDS[@]}"; then OS_FAMILY="rhel"
+  elif has_any_token "$tokens" "${DEB_IDS[@]}";  then OS_FAMILY="ubuntu"
+  else
+    err "Unsupported OS: ID=${ID:-unknown} ID_LIKE=${ID_LIKE:-}"; exit 2
   fi
 }
 
-# Strict file ops used for conf.d drop-in
-ensure_dir() {
-  local d="$1"
-  # If directory already exists, do NOT modify its permissions (preserve e.g., PGDATA 0700/0750)
-  if [[ -d "$d" ]]; then
-    echo "+ dir exists: $d"
-    return 0
-  fi
-  # Try as current user first; fall back to passwordless sudo if needed
-  if install -d -m 0755 "$d" 2>/dev/null; then
-    echo "+ install -d -m 0755 $d"
-    return 0
-  fi
-  if [[ $(id -u) -ne 0 ]] && command -v sudo >/dev/null 2>&1; then
-    run sudo -n install -d -m 0755 "$d"
-  else
-    err "Cannot create directory $d (no permission or sudo)"; exit 1
-  fi
+load_os_module() {
+  local file="${SCRIPT_DIR}/os/${OS_FAMILY}.sh"
+  [[ -r "$file" ]] || { err "Missing module: $file"; exit 2; }
+
+  # shellcheck source=src/pgprovision/_sh/os/rhel.sh
+  # shellcheck source=src/pgprovision/_sh/os/ubuntu.sh
+  # shellcheck disable=SC1091
+  . "$file"
+
+  local req=(os_prepare_repos os_install_packages os_init_cluster os_get_paths os_restart)
+  local missing=() fn
+  for fn in "${req[@]}"; do declare -F "$fn" >/dev/null || missing+=("$fn"); done
+  ((${#missing[@]}==0)) || { err "OS module '$OS_FAMILY' missing: ${missing[*]}"; exit 2; }
 }
+
 ensure_conf_dir_like_conf() {
   local conf_file="$1"
   local dropin_dir
@@ -70,13 +81,7 @@ ensure_conf_dir_like_conf() {
     fi
   fi
 }
-ensure_line() {
-  local f="$1"; shift; local line="$*"
-  # Append only if the exact line is not already present (idempotent)
-  if ! grep -Fqx -- "$line" "$f" 2>/dev/null; then
-    run bash -c "printf '%s\\n' \"$line\" >> \"$f\""
-  fi
-}
+
 write_key_value_dropin() {
   local f="$1" key="$2" val="$3"
   touch "$f"
@@ -90,6 +95,7 @@ write_key_value_dropin() {
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Default config (can be overridden via flags or env file)
+PG_VERSION=${PG_VERSION:-16}
 REPO_KIND=${REPO_KIND:-pgdg}       # pgdg|os
 PORT=${PORT:-5432}
 LISTEN_ADDRESSES=${LISTEN_ADDRESSES:-localhost}
@@ -119,7 +125,7 @@ declare -a LOCAL_MAP_ENTRIES
 
 usage() {
   cat <<USAGE
-airules Postgres Provisioner (PG16)
+Postgres Provisioner (PG16)
 Usage: $0 \
   [--repo pgdg|os] [--port N] [--listen-addresses VAL] [--allowed-cidr CIDR] [--allowed-cidr-v6 CIDR6] \\
   [--data-dir PATH|auto] [--enable-tls] [--init-pg-stat-statements] \\
@@ -135,6 +141,7 @@ USAGE
 parse_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
+      --pg-version) PG_VERSION="$2"; shift 2;;
       --repo) REPO_KIND="$2"; shift 2;;
       --port) PORT="$2"; shift 2;;
       --listen-addresses) LISTEN_ADDRESSES="$2"; shift 2;;
@@ -214,17 +221,17 @@ apply_profile_overrides() {
   esac
 }
 
-assert_psql_is_16() {
+assert_psql_major_matches() {
   # Ensure installed client is version 16.x; fail otherwise.
   if ! command -v psql >/dev/null 2>&1; then
-    err "psql not found after installation; expected PostgreSQL 16 client"
+    err "psql not found after installation; expected PostgreSQL ${PG_VERSION} client"
     exit 2
   fi
   local ver
-  ver=$(psql --version | awk '{print $3}' 2>/dev/null || true)
+  ver=$(psql --version | awk '{print $3}' 2>/dev/null)
   # Accept forms like 16, 16.0, 16.3
-  if [[ -z "$ver" || "${ver%%.*}" != "16" ]]; then
-    err "Expected PostgreSQL client 16.x, found: ${ver:-unknown}"
+  if [[ -z "$ver" || "${ver%%.*}" != "${PG_VERSION}" ]]; then
+    err "Expected PostgreSQL client ${PG_VERSION}.x, found: ${ver:-unknown}"
     exit 2
   fi
 }
@@ -233,7 +240,7 @@ apply_dropin_config() {
   # Strict: fail if we cannot write conf.d or the drop-in
   local conf_file="$1" data_dir="$2" dropin_dir dropin
   dropin_dir="$(dirname "$conf_file")/conf.d"
-  dropin="${dropin_dir}/99-airules.conf"
+  dropin="${dropin_dir}/99-pgprovision.conf"
 
   ensure_conf_dir_like_conf "$conf_file"
   ensure_line "$conf_file" "include_dir = 'conf.d'"
@@ -273,24 +280,6 @@ apply_dropin_config() {
   run chmod 0600 "$dropin" || true
 }
 
-apply_hba_rules() {
-  local hba_file="$1"
-  # Default local rules; idempotent append of exact lines
-  ensure_hba_rule "$hba_file" "local   all             all                                     peer"
-  ensure_hba_rule "$hba_file" "host    all             all             127.0.0.1/32            scram-sha-256"
-  ensure_hba_rule "$hba_file" "host    all             all             ::1/128                 scram-sha-256"
-  if [[ -n "${ALLOWED_CIDR:-}" ]]; then
-    local proto="host"
-    [[ "${ENABLE_TLS:-false}" == "true" ]] && proto="hostssl"
-    ensure_hba_rule "$hba_file" "$proto    all    all    ${ALLOWED_CIDR}    scram-sha-256"
-  fi
-  if [[ -n "${ALLOWED_CIDR_V6:-}" ]]; then
-    local proto="host"
-    [[ "${ENABLE_TLS:-false}" == "true" ]] && proto="hostssl"
-    ensure_hba_rule "$hba_file" "$proto    all    all    ${ALLOWED_CIDR_V6}    scram-sha-256"
-  fi
-}
-
 replace_managed_block_top() {
   local file="$1"; shift
   local begin_marker="$1"; shift
@@ -321,30 +310,10 @@ replace_managed_block_top() {
   rm -f "$tmp" || true
 }
 
-apply_hardened_hba() {
-  local hba_file="$1"
-  local begin="# airules:hba begin (managed)"
-  local end="# airules:hba end"
-  local header
-  header=$(cat <<HBA
-${begin}
-# Enforce peer+map for local connections; keep postgres peer for provisioning
-local   all   postgres                      peer
-local   all   all                           peer map=${LOCAL_PEER_MAP}
-local   all   all                           reject
-# Explicit loopback TCP reject for defense-in-depth
-host    all   all   127.0.0.1/32            reject
-host    all   all   ::1/128                 reject
-${end}
-HBA
-)
-  replace_managed_block_top "$hba_file" "$begin" "$end" "$header"
-}
-
 write_pg_ident_map() {
   local ident_file="$1"
-  local begin="# airules:pg_ident begin (managed)"
-  local end="# airules:pg_ident end"
+  local begin="# pgprovision:pg_ident begin (managed)"
+  local end="# pgprovision:pg_ident end"
   local buf
   buf=$(printf '%s\n' "$begin" "# MAPNAME SYSTEM-USER DB-ROLE")
   local entry osuser dbrole
@@ -409,7 +378,7 @@ conditionally_init_pg_stat_statements() {
 
 write_stamp() {
   local data_dir="$1"; ensure_dir "$data_dir"
-  local stamp="${data_dir}/.airules_provisioned.json"
+  local stamp="${data_dir}/.pgprovision_provisioned.json"
   run bash -c "cat > '${stamp}' <<JSON
 {
   \"port\": ${PORT},
@@ -462,29 +431,9 @@ main() {
   load_env_file
   apply_profile_overrides
   os_detect
+  load_os_module
 
-  # Source OS module
-  case "$OS_FAMILY" in
-    rhel) . "${SCRIPT_DIR}/../../environments/rhel/provision/postgres/rhel.sh" ;;
-    ubuntu) . "${SCRIPT_DIR}/../../environments/ubuntu/provision/postgres/ubuntu.sh" ;;
-    *) err "Unsupported OS family: $OS_FAMILY"; exit 2;;
-  esac
-
-  # Hardened RHEL: force local-only bindings and ignore network flags
-  if [[ "$OS_FAMILY" == "rhel" ]]; then
-    # “Default to socket‑only on RHEL.
-    # To enable TCP, set SOCKET_ONLY=false (via env or a future flag).
-    # --listen-addresses/--allow-network are ignored while socket‑only is true.”
-    if [[ -z "${SOCKET_ONLY}" ]]; then SOCKET_ONLY=true; fi
-    if [[ "${SOCKET_ONLY}" == "true" ]]; then
-      LISTEN_ADDRESSES=''
-      ALLOWED_CIDR=""
-      ALLOWED_CIDR_V6=""
-      ALLOW_NETWORK=false
-    fi
-  fi
-
-  log "Provisioning PostgreSQL 16 on ${OS_FAMILY} (repo=${REPO_KIND})"
+  log "Provisioning PostgreSQL ${PG_VERSION} on ${OS_FAMILY} (repo=${REPO_KIND})"
   if [[ "$DRY_RUN" == "true" ]]; then
     log "Dry-run: would prepare repos, install packages, and configure"
     exit 0
@@ -492,7 +441,7 @@ main() {
 
   os_prepare_repos "$REPO_KIND"
   os_install_packages
-  assert_psql_is_16
+  assert_psql_major_matches
   os_init_cluster "$DATA_DIR"
 
   # Resolve paths
@@ -501,7 +450,8 @@ main() {
 
   apply_dropin_config "$CONF_FILE" "$DATA_DIR"
   ensure_socket_group_and_members "$UNIX_SOCKET_GROUP"
-  apply_hardened_hba "$HBA_FILE"
+  apply_hba_policy "$HBA_FILE"
+
   if [[ -n "${IDENT_FILE:-}" ]]; then
     write_pg_ident_map "$IDENT_FILE"
     # Ensure pg_ident.conf attributes are tight even if created fresh
@@ -517,9 +467,9 @@ main() {
   fi
 
   os_restart "$SERVICE"
-  conditionally_init_pg_stat_statements || true
+  conditionally_init_pg_stat_statements
   setup_role_mappings_and_admin || true
-  #create_db_and_user || true
+  create_db_and_user || true
   write_stamp "$DATA_DIR"
 
   log "PostgreSQL provisioning completed."

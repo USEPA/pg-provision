@@ -23,8 +23,8 @@ os_detect
 
 # Load OS paths
 case "$OS_FAMILY" in
-  rhel) . "${SCRIPT_DIR}/../../environments/rhel/provision/postgres/rhel.sh" ;;
-  ubuntu) . "${SCRIPT_DIR}/../../environments/ubuntu/provision/postgres/ubuntu.sh" ;;
+  rhel) . "${SCRIPT_DIR}/os/rhel.sh" ;;
+  ubuntu) . "${SCRIPT_DIR}/os/ubuntu.sh" ;;
 esac
 
 # Resolve paths; fail fast on errors
