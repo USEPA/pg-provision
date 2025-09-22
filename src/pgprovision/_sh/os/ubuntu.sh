@@ -5,20 +5,24 @@
 
 _apt_update_once_done="false"
 _cnf_hook="/etc/apt/apt.conf.d/50command-not-found"
+_cnf_stash="/run/pgprovision-apt-stash"
 
 _disable_cnf_hook() {
 	if [[ -f "${_cnf_hook}" ]]; then
-		run "${SUDO[@]}" mv -f "${_cnf_hook}" "${_cnf_hook}.bak.pgprov" || true
+		run install -d -m 0755 "${_cnf_stash}"
+		run mv -f "${_cnf_hook}" "${_cnf_stash}/"
 		echo "+ disabled command-not-found APT hook"
 	fi
 }
 
 _restore_cnf_hook() {
-	if [[ -f "${_cnf_hook}.bak.pgprov" ]]; then
-		run "${SUDO[@]}" mv -f "${_cnf_hook}.bak.pgprov" "${_cnf_hook}" || true
+	if [[ -f "${_cnf_stash}/50command-not-found" ]]; then
+		run mv -f "${_cnf_stash}/50command-not-found" "${_cnf_hook}"
+		rmdir "${_cnf_stash}" 2>/dev/null || true
 		echo "+ restored command-not-found APT hook"
 	fi
 }
+
 _apt_update_once() {
 	if [[ "${_apt_update_once_done}" != "true" ]]; then
 		# Disable problematic APT post-invoke hook that may import apt_pkg with a mismatched python3.

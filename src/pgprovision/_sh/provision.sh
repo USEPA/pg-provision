@@ -473,10 +473,10 @@ create_db_and_user() {
 		_db_lit=$(printf '%s' "$CREATE_DB" | sed "s/'/''/g")
 		_owner="${CREATE_USER:-postgres}"
 		_owner_ident=$(printf '%s' "$_owner" | sed 's/"/""/g')
-		"${psql[@]}" -c "DO \$\$ BEGIN
-        IF NOT EXISTS (SELECT FROM pg_database WHERE datname='${_db_lit}')
-        THEN CREATE DATABASE \"${_db_ident}\" OWNER \"${_owner_ident}\"; END IF;
-      END \$\$;" || rc=$?
+
+		if ! "${psql[@]}" -c "SELECT 1 FROM pg_database WHERE datname='${_db_lit}'" | grep -qx 1; then
+			"${psql[@]}" -c "CREATE DATABASE \"${_db_ident}\" OWNER \"${_owner_ident}\";" || rc=$?
+		fi
 	fi
 
 	return "$rc"

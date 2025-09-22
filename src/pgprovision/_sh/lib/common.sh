@@ -20,18 +20,20 @@ must_run() {
 	local msg="$1"
 	shift
 	if ! run "$@"; then
-		err "$msg (rc=$?)"
-		exit 1
+		local rc=$?
+		err "$msg (rc=$rc)"
+		exit "$rc"
 	fi
 }
 
 soft_run() {
 	local msg="$1"
 	shift
-	run "$@" || {
-		warn "$msg (rc=$?)"
+	if ! run "$@"; then
+		local rc=$?
+		warn "$msg (rc=$rc)"
 		return 0
-	}
+	fi
 }
 
 _as_root() {
@@ -44,12 +46,11 @@ _as_root() {
 
 write_key_value_dropin() {
 	local f="$1" key="$2" val="$3"
-	: >/dev/null
 	_as_root touch "$f"
-	if grep -E -q "^[[:space:]]*${key}[[:space:]]*=" "$f"; then
-		_as_root run sed -i -E "s|^[[:space:]]*(${key})[[:space:]]*=.*$|\1 = ${val}|" "$f"
+	if _as_root grep -E -q "^[[:space:]]*${key}[[:space:]]*=" "$f"; then
+		_as_root sed -i -E "s|^[[:space:]]*(${key})[[:space:]]*=.*$|\1 = ${val}|" "$f"
 	else
-		_as_root run bash -c "printf '%s\n' \"${key} = ${val}\" >> \"$f\""
+		_as_root bash -c "printf '%s\n' \"${key} = ${val}\" >> \"$f\""
 	fi
 }
 
@@ -57,7 +58,7 @@ ensure_line() {
 	local f="$1"
 	shift
 	local line="$*"
-	grep -Fqx -- "$line" "$f" 2>/dev/null || _as_root run bash -c "printf '%s\n' \"$line\" >> \"$f\""
+	_as_root bash -c "grep -Fqx -- \"$line\" \"$f\" 2>/dev/null || printf '%s\n' \"$line\" >> \"$f\""
 }
 
 ensure_dir() {
