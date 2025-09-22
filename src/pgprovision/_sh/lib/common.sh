@@ -16,7 +16,6 @@ run() {
 	"$@"
 }
 
-#Error handling ------------------------------------------------
 must_run() {
 	local msg="$1"
 	shift
@@ -34,16 +33,23 @@ soft_run() {
 		return 0
 	}
 }
-#----------------------------------------------------------------
+
+_as_root() {
+	if [[ $(id -u) -eq 0 ]]; then
+		run "$@"
+	else
+		run sudo -n "$@"
+	fi
+}
 
 write_key_value_dropin() {
 	local f="$1" key="$2" val="$3"
 	: >/dev/null
-	touch "$f"
+	_as_root touch "$f"
 	if grep -E -q "^[[:space:]]*${key}[[:space:]]*=" "$f"; then
-		run sed -i -E "s|^[[:space:]]*(${key})[[:space:]]*=.*$|\1 = ${val}|" "$f"
+		_as_root run sed -i -E "s|^[[:space:]]*(${key})[[:space:]]*=.*$|\1 = ${val}|" "$f"
 	else
-		run bash -c "printf '%s\n' \"${key} = ${val}\" >> \"$f\""
+		_as_root run bash -c "printf '%s\n' \"${key} = ${val}\" >> \"$f\""
 	fi
 }
 
@@ -51,7 +57,7 @@ ensure_line() {
 	local f="$1"
 	shift
 	local line="$*"
-	grep -Fqx -- "$line" "$f" 2>/dev/null || run bash -c "printf '%s\n' \"$line\" >> \"$f\""
+	grep -Fqx -- "$line" "$f" 2>/dev/null || _as_root run bash -c "printf '%s\n' \"$line\" >> \"$f\""
 }
 
 ensure_dir() {
