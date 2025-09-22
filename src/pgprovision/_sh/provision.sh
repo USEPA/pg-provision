@@ -10,6 +10,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=src/pgprovision/_sh/lib/hba.sh
 . "${SCRIPT_DIR}/lib/hba.sh"
 
+# shellcheck source=src/pgprovision/_sh/lib/profile.sh
+. "${SCRIPT_DIR}/lib/profile.sh"
+
+
 require_root_or_sudo() {
   if [[ $(id -u) -eq 0 ]]; then return 0; fi
   if command -v sudo >/dev/null 2>&1 && sudo -n true 2>/dev/null; then return 0; fi
@@ -66,32 +70,34 @@ load_os_module() {
 ensure_conf_dir_like_conf() {
   local conf_file="$1"
   local dropin_dir
-  dropin_dir="$(dirname "$conf_file")/conf.d"
-  local owner group
+  dropin_dir="$(dirname -- "$conf_file")/conf.d"
+
+  # Already present → nothing to do
+  [[ -d "$dropin_dir" ]] && return 0
+
+  local owner="" group=""
+
+  # Try to match base config ownership if it exists
   if [[ -f "$conf_file" ]]; then
-    owner=$(stat -c '%U' "$conf_file" 2>/dev/null || owner="")
-    group=$(stat -c '%G' "$conf_file" 2>/dev/null || group="")
-  fi
-  if [[ ! -d "$dropin_dir" ]]; then
-    if [[ -n "$owner" && -n "$group" ]]; then
-      must_run install -d -o "$owner" -g "$group" -m 0700 "$dropin_dir"
-    else
-      must_run install -d -m 0700 "$dropin_dir"
+    owner=$(stat -c '%U' -- "$conf_file" 2>/dev/null) || owner=""
+    group=$(stat -c '%G' -- "$conf_file" 2>/dev/null) || group=""
+    [[ "$owner" == "UNKNOWN" ]] && owner=$(stat -c '%u' -- "$conf_file" 2>/dev/null || echo "")
+    [[ "$group" == "UNKNOWN" ]] && group=$(stat -c '%g' -- "$conf_file" 2>/dev/null || echo "")
+  else
+    # Optional nicety: if postgres exists, mirror that user for the new dir
+    if id -u postgres >/dev/null 2>&1; then
+      owner="postgres"; group="postgres"
     fi
   fi
-}
 
-write_key_value_dropin() {
-  local f="$1" key="$2" val="$3"
-  touch "$f"
-  if grep -E -q "^\s*${key}\s*=\s*" "$f"; then
-    run sed -i -E "s|^\s*(${key})\s*=.*$|\1 = ${val}|" "$f"
+  if [[ -n "$owner" && -n "$group" ]]; then
+    must_run "create drop-in dir with owner/group ($owner:$group): $dropin_dir" \
+      "${SUDO[@]}" install -d -o "$owner" -g "$group" -m 0700 -- "$dropin_dir"
   else
-    run bash -c "printf '%s\\n' \"${key} = ${val}\" >> \"$f\""
+    must_run "create drop-in dir: $dropin_dir" \
+      "${SUDO[@]}" install -d -m 0700 -- "$dropin_dir"
   fi
 }
-
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # Default config (can be overridden via flags or env file)
 PG_VERSION=${PG_VERSION:-16}
@@ -196,7 +202,7 @@ assert_psql_major_matches() {
 apply_dropin_config() {
   # Strict: fail if we cannot write conf.d or the drop-in
   local conf_file="$1" data_dir="$2" dropin_dir dropin
-  dropin_dir="$(dirname "$conf_file")/conf.d"
+  dropin_dir="$(dirname -- "$conf_file")/conf.d"
   dropin="${dropin_dir}/99-pgprovision.conf"
 
   ensure_conf_dir_like_conf "$conf_file"
@@ -233,21 +239,30 @@ apply_dropin_config() {
   fi
 
   # Tighten permissions on drop-in to match/confine to base conf owner and 0600 mode
-  must_run chown --reference "$conf_file" "$dropin"
-  must_run chmod 0600 "$dropin"
+    must_run "align owner of $dropin to $conf_file" "${SUDO[@]}" chown --reference "$conf_file" "$dropin"
+    must_run "set secure permissions on $dropin"    "${SUDO[@]}" chmod 0600 "$dropin"
 }
 
 replace_managed_block_top() {
   local file="$1"; shift
   local begin_marker="$1"; shift
   local end_marker="$1"; shift
-  local content="$1"
-  local tmp new mode owner group
+  local content="$1"; shift
+  # optional: reference file to copy attributes from when $file does not exist
+  local ref="${1:-}"       # may be empty
+  # optional: default mode to apply when $file does not exist and ref not usable
+  local default_mode="${2:-}"  # e.g., "0600" for sensitive files; may be empty
+
+  local tmp new mode="" owner="" group=""
   tmp="$(mktemp)"; new="$(mktemp)"
+
   if [[ -f "$file" ]]; then
-    mode=$(must_stat -c '%a' "$file")
-    owner=$(must_stat -c '%U' "$file")
-    group=$(must_stat -c '%G' "$file")
+    # File exists: preserving attributes is required → failures are fatal
+    mode=$(stat  -c '%a' -- "$file") || { err "cannot stat mode of $file"; rm -f "$tmp" "$new"; return 1; }
+    owner=$(stat -c '%U' -- "$file") || { err "cannot stat owner of $file"; rm -f "$tmp" "$new"; return 1; }
+    group=$(stat -c '%G' -- "$file") || { err "cannot stat group of $file"; rm -f "$tmp" "$new"; return 1; }
+    [[ "$owner" == "UNKNOWN" ]] && owner=$(stat -c '%u' -- "$file")   # fallback to numeric uid
+    [[ "$group" == "UNKNOWN" ]] && group=$(stat -c '%g' -- "$file")   # fallback to numeric gid
     awk -v b="$begin_marker" -v e="$end_marker" '
       BEGIN {ib=0}
       $0==b {ib=1; next}
@@ -255,16 +270,33 @@ replace_managed_block_top() {
       ib==0 {print}
     ' "$file" >"$tmp"
   else
+    # File absent: no prior attributes to preserve.
+    # Prepare empty base (so we can prepend our managed block at the top).
     : >"$tmp"
+    # Try to take attrs from ref if provided.
+    if [[ -n "$ref" && -f "$ref" ]]; then
+      owner=$(stat -c '%U' -- "$ref" 2>/dev/null || true); [[ "$owner" == "UNKNOWN" ]] && owner=$(stat -c '%u' -- "$ref" 2>/dev/null || true)
+      group=$(stat -c '%G' -- "$ref" 2>/dev/null || true); [[ "$group" == "UNKNOWN" ]] && group=$(stat -c '%g' -- "$ref" 2>/dev/null || true)
+    fi
+    # Mode: use provided default if any (e.g., 0600 for HBA/ident). Leave empty otherwise.
+    [[ -n "$default_mode" ]] && mode="$default_mode"
   fi
+
   {
     printf '%s\n' "$content"
     cat "$tmp"
   } >"$new"
-  must_run mv -f "$new" "$file"
-  if [[ -n "$owner$group" ]]; then must_run chown "$owner:$group" "$file"; fi
-  if [[ -n "$mode" ]]; then must_run chmod "$mode" "$file"; fi
-  must_rm -f "$tmp"
+
+  must_run "atomically replace $file" "${SUDO[@]}" mv -f "$new" "$file"
+  # Restore or set attributes
+  if [[ -n "$owner$group" ]]; then
+    must_run "chown $owner:$group $file" "${SUDO[@]}" chown "$owner:$group" "$file"
+  fi
+  if [[ -n "$mode" ]]; then
+    must_run "chmod $mode $file" "${SUDO[@]}" chmod "$mode" "$file"
+  fi
+
+  rm -f "$tmp"
 }
 
 write_pg_ident_map() {
@@ -280,25 +312,25 @@ write_pg_ident_map() {
     buf=$(printf '%s\n%s %s %s' "$buf" "$LOCAL_PEER_MAP" "$osuser" "$dbrole")
   done
   buf=$(printf '%s\n%s\n' "$buf" "$end")
-  replace_managed_block_top "$ident_file" "$begin" "$end" "$buf"
+  replace_managed_block_top "$ident_file" "$begin" "$end" "$buf" "${CONF_FILE:-}" "0600"
 }
 
 ensure_socket_group_and_members() {
   local group="$1"; shift
   # Ensure group exists
   if ! getent group "$group" >/dev/null; then
-    must_run groupadd -f "$group"
+     must_run "create group $group" "${SUDO[@]}" groupadd -f "$group"
   fi
   # Ensure postgres belongs to the socket group
   if id -u postgres >/dev/null 2>&1; then
-    must_run usermod -aG "$group" postgres
+    must_run "add postgres to $group" "${SUDO[@]}" usermod -aG "$group" postgres
   fi
   # Add mapped OS users to the socket group
   local entry osuser
   for entry in "${LOCAL_MAP_ENTRIES[@]:-}"; do
     osuser="${entry%%:*}"
     if id -u "$osuser" >/dev/null 2>&1; then
-      must_run usermod -aG "$group" "$osuser"
+      must_run "add $osuser to $group" "${SUDO[@]}" usermod -aG "$group" "$osuser"
     fi
   done
 }
@@ -306,20 +338,32 @@ ensure_socket_group_and_members() {
 create_db_and_user() {
   [[ -z "$CREATE_DB$CREATE_USER" ]] && return 0
   local psql=(sudo -u postgres psql -v ON_ERROR_STOP=1 -XAt)
+  local rc=0
+
   if [[ -n "$CREATE_USER" ]]; then
-    # Escape identifier (double quotes) and literal (single quotes)
-    local _user_ident; _user_ident=$(printf '%s' "$CREATE_USER" | sed 's/\"/\"\"/g')
-    local _user_lit;   _user_lit=$(printf '%s' "$CREATE_USER" | sed "s/'/''/g")
-    local _pass_lit;   _pass_lit=$(printf '%s' "${CREATE_PASSWORD}" | sed "s/'/''/g")
-    "${psql[@]}" -c "DO \$\$ BEGIN IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='${_user_lit}') THEN CREATE ROLE \"${_user_ident}\" LOGIN PASSWORD '${_pass_lit}'; END IF; END \$\$;" || warn "role create failed"
+    local _user_ident _user_lit _pass_lit
+    _user_ident=$(printf '%s' "$CREATE_USER"     | sed 's/"/""/g')
+    _user_lit=$(  printf '%s' "$CREATE_USER"     | sed "s/'/''/g")
+    _pass_lit=$(  printf '%s' "${CREATE_PASSWORD}" | sed "s/'/''/g")
+    "${psql[@]}" -c "DO \$\$ BEGIN
+        IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='${_user_lit}')
+        THEN CREATE ROLE \"${_user_ident}\" LOGIN PASSWORD '${_pass_lit}'; END IF;
+      END \$\$;" || rc=$?
   fi
+
   if [[ -n "$CREATE_DB" ]]; then
-    local _db_ident;   _db_ident=$(printf '%s' "$CREATE_DB" | sed 's/\"/\"\"/g')
-    local _db_lit;     _db_lit=$(printf '%s' "$CREATE_DB" | sed "s/'/''/g")
-    local _owner;      _owner="${CREATE_USER:-postgres}"
-    local _owner_ident; _owner_ident=$(printf '%s' "${_owner}" | sed 's/\"/\"\"/g')
-    "${psql[@]}" -c "DO \$\$ BEGIN IF NOT EXISTS (SELECT FROM pg_database WHERE datname='${_db_lit}') THEN CREATE DATABASE \"${_db_ident}\" OWNER \"${_owner_ident}\"; END IF; END \$\$;" || warn "db create failed"
+    local _db_ident _db_lit _owner _owner_ident
+    _db_ident=$(printf '%s' "$CREATE_DB" | sed 's/"/""/g')
+    _db_lit=$(  printf '%s' "$CREATE_DB" | sed "s/'/''/g")
+    _owner="${CREATE_USER:-postgres}"
+    _owner_ident=$(printf '%s' "$_owner" | sed 's/"/""/g')
+    "${psql[@]}" -c "DO \$\$ BEGIN
+        IF NOT EXISTS (SELECT FROM pg_database WHERE datname='${_db_lit}')
+        THEN CREATE DATABASE \"${_db_ident}\" OWNER \"${_owner_ident}\"; END IF;
+      END \$\$;" || rc=$?
   fi
+
+  return "$rc"
 }
 
 conditionally_init_pg_stat_statements() {
@@ -336,7 +380,7 @@ conditionally_init_pg_stat_statements() {
 write_stamp() {
   local data_dir="$1"; ensure_dir "$data_dir"
   local stamp="${data_dir}/.pgprovision_provisioned.json"
-  run bash -c "cat > '${stamp}' <<JSON
+  must_run "write stamp ${stamp}" "${SUDO[@]}" bash -c "cat > '${stamp}' <<JSON
 {
   \"port\": ${PORT},
   \"listen_addresses\": \"${LISTEN_ADDRESSES}\",
@@ -347,8 +391,8 @@ write_stamp() {
 }
 JSON"
   if [[ -n "${CONF_FILE:-}" && -f "$CONF_FILE" ]]; then
-    run chown --reference "$CONF_FILE" "$stamp" || true
-    run chmod 0600 "$stamp" || true
+    soft_run "align owner of $stamp to $CONF_FILE" "${SUDO[@]}" chown --reference "$CONF_FILE" "$stamp"
+    must_run "chmod 0600 $stamp"                   "${SUDO[@]}" chmod 0600 "$stamp"
   fi
 }
 
@@ -383,9 +427,17 @@ setup_role_mappings_and_admin() {
 }
 
 main() {
-  require_root_or_sudo
+
   parse_args "$@"
   load_env_file
+
+  # Elevation helper: empty when root or in dry-run
+  SUDO=()
+  if [[ "$DRY_RUN" != "true" ]]; then
+    require_root_or_sudo
+    if [[ $(id -u) -ne 0 ]]; then SUDO=(sudo -n); fi
+  fi
+
   os_detect
   load_os_module
 
@@ -412,8 +464,8 @@ main() {
   if [[ -n "${IDENT_FILE:-}" ]]; then
     write_pg_ident_map "$IDENT_FILE"
     # Ensure pg_ident.conf attributes are tight even if created fresh
-    run chown --reference "$CONF_FILE" "$IDENT_FILE" || true
-    run chmod 0600 "$IDENT_FILE" || true
+    soft_run "align owner of $IDENT_FILE to $CONF_FILE" "${SUDO[@]}" chown --reference "$CONF_FILE" "$IDENT_FILE"
+    must_run "chmod 0600 $IDENT_FILE"                   "${SUDO[@]}" chmod 0600 "$IDENT_FILE"
   fi
 
   # If TLS is requested, ensure cert/key exist before restart
@@ -425,8 +477,8 @@ main() {
 
   os_restart "$SERVICE"
   conditionally_init_pg_stat_statements
-  setup_role_mappings_and_admin || true
-  create_db_and_user || true
+  soft_run "setup role mappings/admin" setup_role_mappings_and_admin
+  must_run "failed to create requested DB/user" create_db_and_user
   write_stamp "$DATA_DIR"
 
   log "PostgreSQL provisioning completed."

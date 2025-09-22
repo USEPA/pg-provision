@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 # Ubuntu 22.04/24.04 + PGDG helpers
-set -Eeuo pipefail
 
 : "${PG_VERSION:=16}"
 
@@ -9,14 +8,14 @@ _cnf_hook="/etc/apt/apt.conf.d/50command-not-found"
 
 _disable_cnf_hook() {
   if [[ -f "${_cnf_hook}" ]]; then
-    run mv -f "${_cnf_hook}" "${_cnf_hook}.bak.pgprov" || true
+    run "${SUDO[@]}" mv -f "${_cnf_hook}" "${_cnf_hook}.bak.pgprov" || true
     echo "+ disabled command-not-found APT hook"
   fi
 }
 
 _restore_cnf_hook() {
   if [[ -f "${_cnf_hook}.bak.pgprov" ]]; then
-    run mv -f "${_cnf_hook}.bak.pgprov" "${_cnf_hook}" || true
+    run "${SUDO[@]}" mv -f "${_cnf_hook}.bak.pgprov" "${_cnf_hook}" || true
     echo "+ restored command-not-found APT hook"
   fi
 }
@@ -25,8 +24,8 @@ _apt_update_once() {
     # Disable problematic APT post-invoke hook that may import apt_pkg with a mismatched python3.
     _disable_cnf_hook || true
     # Try update with hook suppressed, then fallback to normal update.
-    if ! run apt-get -o APT::Update::Post-Invoke-Success= -y update; then
-      run apt-get update -y
+    if ! run "${SUDO[@]}" apt-get -o APT::Update::Post-Invoke-Success= -y update; then
+      run "${SUDO[@]}" apt-get update
     fi
     _restore_cnf_hook || true
     _apt_update_once_done="true"
@@ -35,17 +34,23 @@ _apt_update_once() {
 
 os_prepare_repos() {
   local repo_kind="${1:-pgdg}"
-    run apt-get install -y curl ca-certificates gnupg lsb-release
-    install -d -m 0755 /etc/apt/keyrings
-    curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc | gpg --yes --batch --dearmor -o /etc/apt/keyrings/postgresql.gpg
+
+    _apt_update_once
+    run "${SUDO[@]}" apt-get install -y curl ca-certificates gnupg lsb-release
+    run "${SUDO[@]}" install -d -m 0755 -- /etc/apt/keyrings
+    run bash -c "curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+                 | ${SUDO[*]} gpg --yes --batch --dearmor -o /etc/apt/keyrings/postgresql.gpg"
     local codename
     codename=$(lsb_release -cs)
-    echo "deb [signed-by=/etc/apt/keyrings/postgresql.gpg] http://apt.postgresql.org/pub/repos/apt ${codename}-pgdg main" > /etc/apt/sources.list.d/pgdg.list
+    run bash -c "echo 'deb [signed-by=/etc/apt/keyrings/postgresql.gpg] http://apt.postgresql.org/pub/repos/apt ${codename}-pgdg main' \
+                 | ${SUDO[*]} tee /etc/apt/sources.list.d/pgdg.list >/dev/null"
+    # Ensure PGDG is visible for the subsequent install step
+    run "${SUDO[@]}" apt-get update
 }
 
 os_install_packages() {
   _apt_update_once
-  run apt-get install -y postgresql-${PG_VERSION} postgresql-client-${PG_VERSION} postgresql-contrib
+  run "${SUDO[@]}" apt-get install -y "postgresql-${PG_VERSION}" "postgresql-client-${PG_VERSION}" postgresql-contrib
 }
 
 os_init_cluster() {
@@ -57,13 +62,13 @@ os_init_cluster() {
       err "pg_dropcluster/pg_createcluster not available; cannot relocate data dir to ${data_dir}"
       exit 2
     fi
-    if systemctl is-active --quiet postgresql@${PG_VERSION}-main; then run systemctl stop postgresql@${PG_VERSION}-main; fi
-    run pg_dropcluster --stop 16 main
-    run install -d -m 0700 "$data_dir"
+    if systemctl is-active --quiet "postgresql@${PG_VERSION}-main"; then run "${SUDO[@]}" systemctl stop "postgresql@${PG_VERSION}-main"; fi
+    run "${SUDO[@]}" pg_dropcluster --stop "${PG_VERSION}" main
+    run "${SUDO[@]}" install -d -m 0700 -- "$data_dir"
     ubuntu_apparmor_allow_datadir "$data_dir" || true  # defensive: non-fatal on systems without AppArmor
-    run pg_createcluster 16 main -d "$data_dir"
+    run "${SUDO[@]}" pg_createcluster "${PG_VERSION}" main -d "$data_dir"
   fi
-  run systemctl enable --now postgresql@${PG_VERSION}-main
+  run "${SUDO[@]}" systemctl enable --now "postgresql@${PG_VERSION}-main"
 }
 
 os_get_paths() {
@@ -72,34 +77,28 @@ os_get_paths() {
 
 os_enable_and_start() {
   local svc="${1:-postgresql@${PG_VERSION}-main}"
-  run systemctl enable --now "$svc"
+  run "${SUDO[@]}" systemctl enable --now "$svc"
 }
 
 os_restart() {
   local svc="${1:-postgresql@${PG_VERSION}-main}"
-  run systemctl restart "$svc"
+  run "${SUDO[@]}" systemctl restart "$svc"
 }
 
-# Add AppArmor local override for custom data directory and reload profile
 ubuntu_apparmor_allow_datadir() {
   local dir="$1"
   # Paths per Ubuntu packaging of PostgreSQL
   local profile="/etc/apparmor.d/usr.lib.postgresql.postgres"
   local local_override="/etc/apparmor.d/local/usr.lib.postgresql.postgres"
-  run install -d -m 0755 "$(dirname "$local_override")"
+  run "${SUDO[@]}" install -d -m 0755 -- "$(dirname "$local_override")"
   local rule="  ${dir}/** rwk,"
-  run bash -c "printf '%s\n' \"$rule\" >> \"$local_override\""
+  run bash -c "printf '%s\n' \"$rule\" | ${SUDO[*]} tee -a \"$local_override\" >/dev/null"
   if command -v apparmor_parser >/dev/null 2>&1 && [[ -f "$profile" ]]; then
-    run apparmor_parser -r "$profile" || warn "apparmor_parser reload failed"
+    run "${SUDO[@]}" apparmor_parser -r "$profile" || warn "apparmor_parser reload failed"
   else
     # Fallback: try service reload
     if systemctl list-units --type=service | grep -q apparmor; then
-      # STRICT-TODO: Enforce reload success or surface failure to operator.
-      # Defensive rationale:
-      # - On some systems, reload may not be supported; best-effort avoids hard failures.
-      # Strict rationale:
-      # - Without a successful reload, new path permissions aren’t enforced; failing here is clearer.
-      run systemctl reload apparmor || true
+      run "${SUDO[@]}" systemctl reload apparmor || true
     fi
   fi
 }
