@@ -28,4 +28,3 @@ Secrets baseline maintenance
 Notes
 - Hooks are pinned to specific versions for reproducibility.
 - CI runs the same suite via GitHub Actions (see .github/workflows/pre-commit.yml).
-

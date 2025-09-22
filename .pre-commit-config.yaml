@@ -66,4 +66,3 @@ repos:
       - id: detect-secrets
         args: ["--baseline", ".secrets.baseline"]
         stages: [pre-commit]
-
