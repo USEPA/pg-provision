@@ -22,20 +22,6 @@ soft_run() {
   local msg="$1"; shift
   run "$@" || { warn "$msg (rc=$?)"; return 0; }
 }
-
-must_stat() {
-  local msg="$1"; shift
-  if ! stat "$@"; then
-      err "$msg (rc=$?)"; exit 1
-  fi  
-}
-
-must_rm() {
-  local msg="$1"; shift
-  if ! rm "$@"; then
-      err "$msg (rc=$?)"; exit 1
-  fi  
-}
 #----------------------------------------------------------------
 
 write_key_value_dropin() {

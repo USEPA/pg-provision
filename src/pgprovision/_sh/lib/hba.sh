@@ -69,5 +69,5 @@ apply_hba_policy() {
   local begin="# pgprovision:hba begin (managed)"
   local end="# pgprovision:hba end"
   local block; block="$(hba_policy_block)"
-  replace_managed_block_top "$hba_file" "$begin" "$end" "$block"
+  replace_managed_block_top "$hba_file" "$begin" "$end" "$block" "${CONF_FILE:-}" "0600"
 }
