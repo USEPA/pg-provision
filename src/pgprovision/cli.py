@@ -40,7 +40,3 @@ def main(argv=None):
         return _run_script("provision.sh", ["--help"])
 
     return _run_script("provision.sh", rest)
-
-
-def validate_main(argv=None):
-    return _run_script("validate.sh", [])

@@ -493,26 +493,6 @@ conditionally_init_pg_stat_statements() {
 	fi
 }
 
-write_stamp() {
-	local data_dir="$1"
-	ensure_dir "$data_dir"
-	local stamp="${data_dir}/.pgprovision_provisioned.json"
-	must_run "write stamp ${stamp}" "${SUDO[@]}" bash -c "cat > '${stamp}' <<JSON
-{
-  \"port\": ${PORT},
-  \"listen_addresses\": \"${LISTEN_ADDRESSES}\",
-  \"repo\": \"${REPO_KIND}\",
-  \"allow_network\": ${ALLOW_NETWORK},
-  \"enable_tls\": ${ENABLE_TLS},
-  \"profile\": \"${PROFILE}\"
-}
-JSON"
-	if [[ -n "${CONF_FILE:-}" && -f "$CONF_FILE" ]]; then
-		soft_run "align owner of $stamp to $CONF_FILE" "${SUDO[@]}" chown --reference "$CONF_FILE" "$stamp"
-		must_run "chmod 0600 $stamp" "${SUDO[@]}" chmod 0600 "$stamp"
-	fi
-}
-
 setup_role_mappings_and_admin() {
 	# Create DB roles for mappings and optional admin group/login.
 	local psql=(sudo -u postgres psql -v ON_ERROR_STOP=1 -XAt)
@@ -541,6 +521,35 @@ setup_role_mappings_and_admin() {
 		warn "ALTER ROLE postgres NOLOGIN requested; ensure you have verified admin login + SET ROLE path before enabling this."
 		"${psql[@]}" -c "ALTER ROLE postgres NOLOGIN;" || warn "failed to set postgres NOLOGIN"
 	fi
+}
+
+write_stamp() {
+  local data_dir="$1"
+  # Prefer asking the server (we run this after restart)
+  if [[ -z "$data_dir" ]]; then
+    data_dir=$(sudo -u postgres psql -At -c "SHOW data_directory;" 2>/dev/null || true)
+  fi
+  # Still nothing? nothing to do.
+  if [[ -z "$data_dir" ]]; then
+    warn "write_stamp: could not determine data_directory; skipping"
+    return 0
+  fi
+
+  local stamp="${data_dir}/.pgprovision_provisioned.json"
+  must_run "write stamp ${stamp}" "${SUDO[@]}" bash -c "cat > '${stamp}' <<JSON
+{
+  \"port\": ${PORT},
+  \"listen_addresses\": \"${LISTEN_ADDRESSES}\",
+  \"repo\": \"${REPO_KIND}\",
+  \"allow_network\": ${ALLOW_NETWORK},
+  \"enable_tls\": ${ENABLE_TLS},
+  \"profile\": \"${PROFILE}\"
+}
+JSON"
+  if [[ -n "${CONF_FILE:-}" && -f "$CONF_FILE" ]]; then
+    soft_run "align owner of $stamp to $CONF_FILE" "${SUDO[@]}" chown --reference "$CONF_FILE" "$stamp"
+    must_run "chmod 0600 $stamp"                   "${SUDO[@]}" chmod 0600 "$stamp"
+  fi
 }
 
 main() {
