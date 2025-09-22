@@ -9,7 +9,7 @@ exclude: |
     ^(node_modules|vendor|dist|build|\.venv|\.tox|\.mypy_cache|\.ruff_cache|\.git|\.idea|\.vscode|coverage|\.pytest_cache|\.terraform|target|\.eggs|eggs-info|site-packages)/
   )
 
-default_stages: [commit]
+default_stages: [pre-commit]
 default_language_version:
   python: python3
 
@@ -44,18 +44,20 @@ repos:
     hooks:
       - id: black
 
-  # Shell formatting
+  #Shell formatting
   - repo: https://github.com/scop/pre-commit-shfmt
-    rev: v3.8.0
+    rev: v3.12.0-2
     hooks:
-      - id: shfmt
-        args: ["-i", "2", "-ci"]
+      # Choose one of:
+      - id: shfmt         # prebuilt upstream executable
+      - id: shfmt-src     # build from source (requires/installs Go to build)
+      - id: shfmt-docker  # Docker image (requires Docker to run)
 
   # Shell linting
-  - repo: https://github.com/pre-commit/mirrors-shellcheck
-    rev: v0.10.0
+  - repo: https://github.com/koalaman/shellcheck-precommit
+    rev: v0.11.0
     hooks:
-      - id: shellcheck
+    -   id: shellcheck
 
   # Secrets scanning (kept to commit stage; uses repo baseline)
   - repo: https://github.com/Yelp/detect-secrets
@@ -63,5 +65,5 @@ repos:
     hooks:
       - id: detect-secrets
         args: ["--baseline", ".secrets.baseline"]
-        stages: [commit]
+        stages: [pre-commit]
 
