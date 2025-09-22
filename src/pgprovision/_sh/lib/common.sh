@@ -8,26 +8,33 @@ _c_green=$'\033[0;32m'; _c_yellow=$'\033[0;33m'; _c_red=$'\033[0;31m'; _c_reset=
 log()  { echo -e "${_c_green}[pgprovision]${_c_reset} $*"; }
 warn() { echo -e "${_c_yellow}[pgprovision][warn]${_c_reset} $*" 1>&2; }
 err()  { echo -e "${_c_red}[pgprovision][error]${_c_reset} $*" 1>&2; }
-
 run()  { echo "+ $*"; "$@"; }
 
 #Error handling ------------------------------------------------
-CONTINUE_ON_ERROR=${CONTINUE_ON_ERROR:-false}
-
 must_run() {
   local msg="$1"; shift
   if ! run "$@"; then
-    if [[ "$CONTINUE_ON_ERROR" == "true" ]]; then
-      warn "$msg (rc=$?)"
-    else
       err "$msg (rc=$?)"; exit 1
-    fi
-  fi
+  fi  
 }
 
 soft_run() {
   local msg="$1"; shift
   run "$@" || { warn "$msg (rc=$?)"; return 0; }
+}
+
+must_stat() {
+  local msg="$1"; shift
+  if ! stat "$@"; then
+      err "$msg (rc=$?)"; exit 1
+  fi  
+}
+
+must_rm() {
+  local msg="$1"; shift
+  if ! rm "$@"; then
+      err "$msg (rc=$?)"; exit 1
+  fi  
 }
 #----------------------------------------------------------------
 

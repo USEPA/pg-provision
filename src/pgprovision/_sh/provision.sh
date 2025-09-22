@@ -233,8 +233,8 @@ apply_dropin_config() {
   fi
 
   # Tighten permissions on drop-in to match/confine to base conf owner and 0600 mode
-  run chown --reference "$conf_file" "$dropin" || true
-  run chmod 0600 "$dropin" || true
+  must_run chown --reference "$conf_file" "$dropin"
+  must_run chmod 0600 "$dropin"
 }
 
 replace_managed_block_top() {
@@ -245,9 +245,9 @@ replace_managed_block_top() {
   local tmp new mode owner group
   tmp="$(mktemp)"; new="$(mktemp)"
   if [[ -f "$file" ]]; then
-    mode=$(stat -c '%a' "$file" 2>/dev/null || true)
-    owner=$(stat -c '%U' "$file" 2>/dev/null || true)
-    group=$(stat -c '%G' "$file" 2>/dev/null || true)
+    mode=$(must_stat -c '%a' "$file")
+    owner=$(must_stat -c '%U' "$file")
+    group=$(must_stat -c '%G' "$file")
     awk -v b="$begin_marker" -v e="$end_marker" '
       BEGIN {ib=0}
       $0==b {ib=1; next}
@@ -261,10 +261,10 @@ replace_managed_block_top() {
     printf '%s\n' "$content"
     cat "$tmp"
   } >"$new"
-  run mv -f "$new" "$file"
-  if [[ -n "$owner$group" ]]; then run chown "$owner:$group" "$file" || true; fi
-  if [[ -n "$mode" ]]; then run chmod "$mode" "$file" || true; fi
-  rm -f "$tmp" || true
+  must_run mv -f "$new" "$file"
+  if [[ -n "$owner$group" ]]; then must_run chown "$owner:$group" "$file"; fi
+  if [[ -n "$mode" ]]; then must_run chmod "$mode" "$file"; fi
+  must_rm -f "$tmp"
 }
 
 write_pg_ident_map() {
@@ -287,18 +287,18 @@ ensure_socket_group_and_members() {
   local group="$1"; shift
   # Ensure group exists
   if ! getent group "$group" >/dev/null; then
-    run groupadd -f "$group"
+    must_run groupadd -f "$group"
   fi
   # Ensure postgres belongs to the socket group
   if id -u postgres >/dev/null 2>&1; then
-    run usermod -aG "$group" postgres || true
+    must_run usermod -aG "$group" postgres
   fi
   # Add mapped OS users to the socket group
   local entry osuser
   for entry in "${LOCAL_MAP_ENTRIES[@]:-}"; do
     osuser="${entry%%:*}"
     if id -u "$osuser" >/dev/null 2>&1; then
-      run usermod -aG "$group" "$osuser" || true
+      must_run usermod -aG "$group" "$osuser"
     fi
   done
 }
