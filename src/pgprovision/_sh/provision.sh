@@ -40,7 +40,6 @@ os_detect() {
   OS_VERSION_ID="${VERSION_ID:-}"
   OS_CODENAME="${UBUNTU_CODENAME:-${VERSION_CODENAME:-}}"
 
-  # Consider both ID and ID_LIKE in one pass (derivatives covered without OR chains)
   local tokens="${ID:-} ${ID_LIKE:-}"
   if   has_any_token "$tokens" "${RHEL_IDS[@]}"; then OS_FAMILY="rhel"
   elif has_any_token "$tokens" "${DEB_IDS[@]}";  then OS_FAMILY="ubuntu"
@@ -70,14 +69,14 @@ ensure_conf_dir_like_conf() {
   dropin_dir="$(dirname "$conf_file")/conf.d"
   local owner group
   if [[ -f "$conf_file" ]]; then
-    owner=$(stat -c '%U' "$conf_file" 2>/dev/null || true)
-    group=$(stat -c '%G' "$conf_file" 2>/dev/null || true)
+    owner=$(stat -c '%U' "$conf_file" 2>/dev/null || owner="")
+    group=$(stat -c '%G' "$conf_file" 2>/dev/null || group="")
   fi
   if [[ ! -d "$dropin_dir" ]]; then
-    if [[ -n "$owner$group" ]]; then
-      run install -d -o "$owner" -g "$group" -m 0700 "$dropin_dir"
+    if [[ -n "$owner" && -n "$group" ]]; then
+      must_run install -d -o "$owner" -g "$group" -m 0700 "$dropin_dir"
     else
-      run install -d -m 0700 "$dropin_dir"
+      must_run install -d -m 0700 "$dropin_dir"
     fi
   fi
 }
@@ -112,7 +111,7 @@ ENV_FILE=${ENV_FILE:-}
 DRY_RUN=${DRY_RUN:-false}
 INIT_PG_STAT_STATEMENTS=${INIT_PG_STAT_STATEMENTS:-false}
 
-# Local hardening flags (RHEL socket-only Option A by default)
+# Local hardening flags 
 SOCKET_ONLY=${SOCKET_ONLY:-}
 UNIX_SOCKET_GROUP=${UNIX_SOCKET_GROUP:-pgclients}
 UNIX_SOCKET_PERMISSIONS=${UNIX_SOCKET_PERMISSIONS:-0770}
@@ -181,55 +180,13 @@ load_env_file() {
   fi
 }
 
-apply_profile_overrides() {
-  case "${PROFILE}" in
-    xl-32c-256g)
-      PROFILE_OVERRIDES=(
-        "shared_buffers=64GB"
-        "effective_cache_size=192GB"
-        "work_mem=32MB"
-        "maintenance_work_mem=2GB"
-        "autovacuum_work_mem=2GB"
-        "wal_buffers=16MB"
-        "max_wal_size=32GB"
-        "min_wal_size=4GB"
-        "checkpoint_timeout=15min"
-        "checkpoint_completion_target=0.9"
-        "effective_io_concurrency=256"
-        "random_page_cost=1.1"
-        "seq_page_cost=1.0"
-        "default_statistics_target=250"
-        "track_io_timing=on"
-        "max_worker_processes=32"
-        "max_parallel_workers=32"
-        "max_parallel_workers_per_gather=8"
-        "max_parallel_maintenance_workers=4"
-        "autovacuum_max_workers=10"
-        "autovacuum_naptime=10s"
-        "autovacuum_vacuum_scale_factor=0.10"
-        "autovacuum_analyze_scale_factor=0.05"
-        "autovacuum_vacuum_cost_limit=2000"
-        "autovacuum_vacuum_cost_delay=2ms"
-        "idle_in_transaction_session_timeout=5min"
-        "log_checkpoints=on"
-        "log_autovacuum_min_duration=5s"
-      )
-      ;;
-    "" ) :;;
-    *)
-      warn "Unknown profile: ${PROFILE}; ignoring";;
-  esac
-}
-
 assert_psql_major_matches() {
-  # Ensure installed client is version 16.x; fail otherwise.
   if ! command -v psql >/dev/null 2>&1; then
     err "psql not found after installation; expected PostgreSQL ${PG_VERSION} client"
     exit 2
   fi
   local ver
   ver=$(psql --version | awk '{print $3}' 2>/dev/null)
-  # Accept forms like 16, 16.0, 16.3
   if [[ -z "$ver" || "${ver%%.*}" != "${PG_VERSION}" ]]; then
     err "Expected PostgreSQL client ${PG_VERSION}.x, found: ${ver:-unknown}"
     exit 2
@@ -262,7 +219,7 @@ apply_dropin_config() {
     write_key_value_dropin "$dropin" unix_socket_directories "'${UNIX_SOCKET_DIR}'"
   fi
 
-  if [[ -n "${PROFILE:-}" ]]; then
+  if [[ ${#PROFILE_OVERRIDES[@]} -gt 0 ]]; then
     for kv in "${PROFILE_OVERRIDES[@]}"; do
       local k="${kv%%=*}" v="${kv#*=}"
       write_key_value_dropin "$dropin" "$k" "$v"
@@ -429,7 +386,6 @@ main() {
   require_root_or_sudo
   parse_args "$@"
   load_env_file
-  apply_profile_overrides
   os_detect
   load_os_module
 
@@ -448,6 +404,7 @@ main() {
   eval "$(os_get_paths)"  # sets CONF_FILE, HBA_FILE, IDENT_FILE, DATA_DIR, SERVICE
   log "CONF=${CONF_FILE} HBA=${HBA_FILE} IDENT=${IDENT_FILE:-unknown} DATA=${DATA_DIR} SERVICE=${SERVICE}"
 
+  load_profile_overrides
   apply_dropin_config "$CONF_FILE" "$DATA_DIR"
   ensure_socket_group_and_members "$UNIX_SOCKET_GROUP"
   apply_hba_policy "$HBA_FILE"
