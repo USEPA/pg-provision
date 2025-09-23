@@ -1,0 +1,85 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+
+jobs:
+  pre-commit:
+    name: Pre-commit hooks
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install pre-commit and deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pre-commit pytest
+      - name: Run pre-commit on all files
+        run: pre-commit run --all-files --show-diff-on-failure
+
+  unit:
+    name: Unit tests (Ubuntu)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install test deps
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install pytest build twine
+      - name: Run pytest
+        run: pytest -q
+      - name: Smoke: pgprovision --dry-run
+        run: |
+          python -m pip install .
+          pgprovision --dry-run
+      - name: Artifact test (resources)
+        run: |
+          python - <<'PY'
+          import importlib.resources as r
+          p = r.files('pgprovision._sh')
+          print(p)
+          PY
+
+  rocky-smoke:
+    name: Smoke (Rocky Linux 9)
+    runs-on: ubuntu-latest
+    container:
+      image: rockylinux:9
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Python and tools
+        run: |
+          dnf -y update || true
+          dnf -y install python3 python3-pip git
+          python3 -m pip install --upgrade pip
+      - name: Install package
+        run: python3 -m pip install .
+      - name: Smoke: pgprovision --dry-run
+        run: pgprovision --dry-run
+      - name: Artifact test (resources)
+        run: |
+          python3 - <<'PY'
+          import importlib.resources as r
+          print(r.files('pgprovision._sh'))
+          PY
+
+  build:
+    name: Build and check dist
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Build dist
+        run: |
+          python -m pip install --upgrade pip build twine
+          python -m build
+          twine check dist/*

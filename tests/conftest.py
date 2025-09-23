@@ -106,7 +106,6 @@ def bash(provision_sh: Path) -> Callable[[str, Optional[Dict[str, str]]], BashRe
             f". '{provision_sh}';"
             "SUDO=();"
             "PROFILE_OVERRIDES=();"
-            # [plan: Iteration 1 / FR-001..FR-003] Unit-safe elevation stubs (toggle with PGPROVISION_STUB_ELEVATION=0)
             'if [[ "${PGPROVISION_STUB_ELEVATION:-1}" != "0" ]]; then\n'
             "  sudo() {\n"
             "    local -a args=()\n"

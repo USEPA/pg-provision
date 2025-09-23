@@ -1,31 +1,53 @@
 [build-system]
-requires = ["setuptools>=68", "wheel"]
+requires = ["setuptools>=68,<77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "pg-provision"
 version = "0.1.0"
 description = "Idempotent PostgreSQL provisioning as a Python package (wrapping portable shell scripts)"
-readme = "README.md"
-requires-python = ">=3.13"
+readme = { file = "README.md", content-type = "text/markdown" }
+requires-python = ">=3.9"
 license = { text = "MIT" }
 authors = [{name="John Jenkins", email="scr1ptcat@protonmail.com"}]
 classifiers = [
-  "License :: OSI Approved :: MIT License",
   "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.9",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "Environment :: Console",
   "Topic :: System :: Systems Administration",
+  "License :: OSI Approved :: MIT License",
+  "Programming Language :: Python :: 3 :: Only",
+  "Operating System :: POSIX :: Linux",
+  "Intended Audience :: System Administrators",
 ]
 
 [project.scripts]
 pgprovision = "pgprovision.cli:main"
-pgprovision-validate = "pgprovision.cli:validate_main"
+
+[project.urls]
+Homepage = "https://github.com/scr1ptcat/pg-provision"
+Repository = "https://github.com/scr1ptcat/pg-provision"
+Issues = "https://github.com/scr1ptcat/pg-provision/issues"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
+include-package-data = false
+license-files = ["LICENSE"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
 
 [tool.setuptools.package-data]
-"pgprovision" = ["_sh/**"]
+"pgprovision" = [
+  "_sh/*.sh",
+  "_sh/lib/*.sh",
+  "_sh/os/*.sh",
+  "_sh/profiles/*.conf"
+]
 
 [tool.pytest.ini_options]
 addopts = "-ra"

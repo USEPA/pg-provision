@@ -456,28 +456,53 @@ create_db_and_user() {
 	local psql=(sudo -u postgres psql -v ON_ERROR_STOP=1 -XAt)
 	local rc=0
 
-	if [[ -n "$CREATE_USER" ]]; then
-		local _user_ident _user_lit _pass_lit
-		_user_ident=$(printf '%s' "$CREATE_USER" | sed 's/"/""/g')
-		_user_lit=$(printf '%s' "$CREATE_USER" | sed "s/'/''/g")
-		_pass_lit=$(printf '%s' "${CREATE_PASSWORD}" | sed "s/'/''/g")
-		"${psql[@]}" -c "DO \$\$ BEGIN
-        IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='${_user_lit}')
-        THEN CREATE ROLE \"${_user_ident}\" LOGIN PASSWORD '${_pass_lit}'; END IF;
-      END \$\$;" || rc=$?
+	# Support secret from env var or file (file takes effect when var empty)
+	local pw="${CREATE_PASSWORD:-}"
+	if [[ -z "$pw" && -n "${CREATE_PASSWORD_FILE:-}" && -r "$CREATE_PASSWORD_FILE" ]]; then
+		pw="$(<"$CREATE_PASSWORD_FILE")"
 	fi
 
-	if [[ -n "$CREATE_DB" ]]; then
-		local _db_ident _db_lit _owner _owner_ident
-		_db_ident=$(printf '%s' "$CREATE_DB" | sed 's/"/""/g')
-		_db_lit=$(printf '%s' "$CREATE_DB" | sed "s/'/''/g")
-		_owner="${CREATE_USER:-postgres}"
-		_owner_ident=$(printf '%s' "$_owner" | sed 's/"/""/g')
-
-		if ! "${psql[@]}" -c "SELECT 1 FROM pg_database WHERE datname='${_db_lit}'" | grep -qx 1; then
-			"${psql[@]}" -c "CREATE DATABASE \"${_db_ident}\" OWNER \"${_owner_ident}\";" || rc=$?
+	# Build SQL in a secure temp file to avoid leaking secrets via argv or logs
+	local sqlf
+	sqlf="$(mktemp)"
+	chmod 0600 "$sqlf"
+	{
+		if [[ -n "$CREATE_USER" ]]; then
+			local _user_ident _user_lit
+			_user_ident=$(printf '%s' "$CREATE_USER" | sed 's/"/""/g')
+			_user_lit=$(printf '%s' "$CREATE_USER" | sed "s/'/''/g")
+			printf '%s\n' "DO $$ BEGIN"
+			printf '%s\n' "  IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname='${_user_lit}') THEN"
+			if [[ -n "$pw" ]]; then
+				local _pass_lit
+				_pass_lit=$(printf '%s' "$pw" | sed "s/'/''/g")
+				printf '%s\n' "    CREATE ROLE \"${_user_ident}\" LOGIN PASSWORD '${_pass_lit}';"
+			else
+				printf '%s\n' "    CREATE ROLE \"${_user_ident}\" LOGIN;"
+			fi
+			printf '%s\n' "  END IF; END $$;"
 		fi
+
+		if [[ -n "$CREATE_DB" ]]; then
+			local _db_ident _db_lit _owner _owner_ident
+			_db_ident=$(printf '%s' "$CREATE_DB" | sed 's/"/""/g')
+			_db_lit=$(printf '%s' "$CREATE_DB" | sed "s/'/''/g")
+			_owner="${CREATE_USER:-postgres}"
+			_owner_ident=$(printf '%s' "$_owner" | sed 's/"/""/g')
+			printf '%s\n' "DO $$ BEGIN"
+			printf '%s\n' "  IF NOT EXISTS (SELECT 1 FROM pg_database WHERE datname='${_db_lit}') THEN"
+			printf '%s\n' "    CREATE DATABASE \"${_db_ident}\" OWNER \"${_owner_ident}\";"
+			printf '%s\n' "  END IF; END $$;"
+		fi
+	} >"$sqlf"
+
+	# Execute the SQL quietly; must not echo password-bearing lines
+	if ! run_quiet "${psql[@]}" -f "$sqlf"; then
+		rc=$?
 	fi
+
+	# Attempt secure cleanup of the temp file
+	shred -u "$sqlf" 2>/dev/null || rm -f "$sqlf"
 
 	return "$rc"
 }

@@ -1,0 +1,7 @@
+include README.md
+include LICENSE
+recursive-include src/pgprovision/_sh *.sh *.conf
+exclude src/pgprovision/_sh/*.log
+exclude src/pgprovision/_sh/profiles/*.log
+prune out
+prune .github
