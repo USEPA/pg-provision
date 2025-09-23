@@ -1,8 +1,6 @@
-# `rhel-test-guide.md`
+# PostgreSQL Provisioner – RHEL/Rocky/Alma Test Guide (pgprovision)
 
-# PostgreSQL Provisioner – RHEL/Rocky/Alma Test Guide
-
-This guide validates `provision.sh` on RHEL 8/9 (and Rocky/Alma). It assumes PGDG is used by default. It covers installation, service health, HBA policy, profiles, users/DBs, TLS, relocation, and SELinux/firewalld nuances.
+This guide validates the **pg-provision** package on RHEL 8/9 (and Rocky/Alma). It assumes PGDG is used by default. It covers installation, service health, HBA policy, profiles, users/DBs, TLS, relocation, and SELinux/firewalld nuances.
 
 ---
 
@@ -10,23 +8,18 @@ This guide validates `provision.sh` on RHEL 8/9 (and Rocky/Alma). It assumes PGD
 
 * RHEL 8/9, Rocky 8/9, or Alma 8/9 VM with internet access.
 * Willingness to install PostgreSQL 16 (PGDG).
-* Repo layout:
-
-```
-./provision.sh
-./lib/common.sh
-./lib/hba.sh
-./lib/profile.sh
-./os/rhel.sh
-./profiles/                # created during tests
-```
+* Install the package (system or venv):
+  ```bash
+  pip install pg-provision
+  # sanity
+  pgprovision --help
+  ```
 
 **Recommended shell setup**
 
 ```bash
 sudo -s                           # run tests as root
 set -euxo pipefail
-cd /path/to/your/project          # adjust
 ```
 
 > If non-root, ensure passwordless sudo and that helpers writing under `$PGDATA` and `/var/lib/pgsql/...` use sudo.
@@ -36,15 +29,16 @@ cd /path/to/your/project          # adjust
 ## 1) Dry‑run smoke test
 
 ```bash
-./provision.sh --dry-run | tee ./pgprov_dryrun_rhel.log
-! grep -qE '^\+ (dnf|yum) install' ./pgprov_dryrun_rhel.log
+pgprovision --dry-run | tee ./pgprov_dryrun_rhel.log
+# Assert: dry-run must not try to install packages
+! grep -qE '(^|[[:space:]])(dnf|yum)[[:space:]]+install([[:space:]]|$)' ./pgprov_dryrun_rhel.log
 ```
 
 ---
 
 ## 2) Full install (PGDG repo, packages, cluster, service)
 
-Your RHEL OS module should:
+The provisioner should:
 
 * Install PGDG repo RPM.
 * Disable the AppStream PostgreSQL module.
@@ -54,7 +48,7 @@ Your RHEL OS module should:
 Run:
 
 ```bash
-./provision.sh | tee ./pgprov_install_rhel.log
+pgprovision | tee ./pgprov_install_rhel.log
 
 systemctl status postgresql-16 --no-pager || true
 sudo -u postgres /usr/pgsql-16/bin/psql -At -c "SELECT version();"
@@ -88,14 +82,14 @@ awk '/^# pgprovision:hba begin \(managed\)/,/^# pgprovision:hba end/' "$HBA"
 ### Socket‑only posture
 
 ```bash
-SOCKET_ONLY=true ./provision.sh
+SOCKET_ONLY=true pgprovision
 awk '/^# pgprovision:hba begin \(managed\)/,/^# pgprovision:hba end/' "$HBA" | grep -A2 'socket-only'
 ```
 
 ### Allow networks
 
 ```bash
-ALLOW_NETWORK=true ALLOWED_CIDR="10.0.0.0/8, 192.168.1.0/24" ./provision.sh
+ALLOW_NETWORK=true ALLOWED_CIDR="10.0.0.0/8, 192.168.1.0/24" pgprovision
 awk '/^# pgprovision:hba begin \(managed\)/,/^# pgprovision:hba end/' "$HBA" | grep -E '10\.0\.0\.0/8|192\.168\.1\.0/24'
 ```
 
@@ -121,7 +115,7 @@ default_statistics_target=250
 track_io_timing=on
 EOF
 
-PROFILE=xl-32c-256g ./provision.sh
+PROFILE=xl-32c-256g pgprovision
 DROPIN=/var/lib/pgsql/16/data/conf.d/99-pgprovision.conf
 grep -E 'shared_buffers|max_wal_size|track_io_timing' "$DROPIN"
 ```
@@ -131,7 +125,7 @@ grep -E 'shared_buffers|max_wal_size|track_io_timing' "$DROPIN"
 ## 5) User and database creation
 
 ```bash
-./provision.sh --create-user devuser --create-password 'pAs$123' --create-db devdb
+pgprovision --create-user devuser --create-password 'pAs$123' --create-db devdb
 
 sudo -u postgres /usr/pgsql-16/bin/psql -At -c "SELECT rolname, rolcanlogin FROM pg_roles WHERE rolname='devuser';"
 sudo -u postgres /usr/pgsql-16/bin/psql -At -c "SELECT datname, pg_get_userbyid(datdba) FROM pg_database WHERE datname='devdb';"
@@ -143,10 +137,10 @@ sudo -u postgres /usr/pgsql-16/bin/psql -At -c "SELECT datname, pg_get_userbyid(
 
 ```bash
 ME=$(logname 2>/dev/null || echo "$SUDO_USER")
-./provision.sh --local-peer-map localmap --local-map-entry "${ME}:dev_role" --unix-socket-group pgclients
+pgprovision --local-peer-map localmap --local-map-entry "${ME}:dev_role" --unix-socket-group pgclients
 
 getent group pgclients
-getent group pgclients | grep -E "(^|,|\s)${ME}(\s|,|$)" || true
+getent group pgclients | grep -E "(^|,|\\s)${ME}(\\s|,|$)" || true
 sudo -u postgres /usr/pgsql-16/bin/psql -At -c "SELECT rolname FROM pg_roles WHERE rolname = 'dev_role';"
 ```
 
@@ -158,7 +152,7 @@ sudo -u postgres /usr/pgsql-16/bin/psql -At -c "SELECT rolname FROM pg_roles WHE
 
 ```bash
 set +e
-ENABLE_TLS=true ./provision.sh
+ENABLE_TLS=true pgprovision
 echo "RC=$?"
 set -e
 ```
@@ -172,7 +166,7 @@ openssl req -x509 -newkey rsa:2048 -nodes -keyout "$DATA_DIR/server.key" -out "$
 chown postgres:postgres "$DATA_DIR/server.crt" "$DATA_DIR/server.key"
 chmod 0600 "$DATA_DIR/server.key"
 
-ENABLE_TLS=true ./provision.sh
+ENABLE_TLS=true pgprovision
 sudo -u postgres /usr/pgsql-16/bin/psql -At -c "SHOW ssl;"
 sudo -u postgres /usr/pgsql-16/bin/psql -At -c "SHOW ssl_min_protocol_version;"
 ```
@@ -185,7 +179,7 @@ sudo -u postgres /usr/pgsql-16/bin/psql -At -c "SHOW ssl_min_protocol_version;"
 
 ```bash
 NEW_DATA="/var/lib/pgsql/16/custom-data"
-./provision.sh --data-dir "$NEW_DATA"
+pgprovision --data-dir "$NEW_DATA"
 sudo -u postgres /usr/pgsql-16/bin/psql -At -c "SHOW data_directory;" | grep -F "$NEW_DATA"
 ```
 

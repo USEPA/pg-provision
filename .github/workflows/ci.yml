@@ -1,0 +1,132 @@
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  pre-commit:
+    name: Pre-commit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.13'
+          cache: 'pip'
+      - uses: pre-commit/action@v3.0.1
+        with:
+          extra_args: --all-files
+
+  unit:
+    name: Unit tests (Ubuntu, py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ['3.9', '3.10', '3.11', '3.12', '3.13']
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+          cache: 'pip'
+      - name: Install test deps
+        env:
+          PIP_DISABLE_PIP_VERSION_CHECK: '1'
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -U pytest build twine
+      - name: Run pytest
+        run: pytest -q    
+      - name: "Smoke: pgprovision --dry-run"
+        run: |
+          python -m pip install .
+          pgprovision --dry-run
+      - name: "Artifact test (importlib.resources)"
+        run: |
+          python - <<'PY'
+          import os, sys
+          from importlib.resources import files, as_file
+          p = files('pgprovision').joinpath('_sh', 'provision.sh')
+          with as_file(p) as f:
+              print(f)
+              sys.exit(0 if os.path.exists(f) else 1)
+          PY
+
+  rocky-smoke:
+    name: Smoke (Rocky Linux 9)
+    runs-on: ubuntu-latest
+    container:
+      image: rockylinux:9
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Python and tools
+        run: |
+          set -euxo pipefail
+          dnf -y update || true
+          dnf -y install python3 python3-pip git sudo
+          python3 -m pip install --upgrade pip
+      - name: Install package
+        run: python3 -m pip install .
+      - name: "Smoke: pgprovision --dry-run"
+        run: pgprovision --dry-run
+
+      - name: "Artifact test (importlib.resources)"
+        run: |
+          python3 - <<'PY'
+          import os, sys
+          from importlib.resources import files, as_file
+          p = files('pgprovision').joinpath('_sh', 'provision.sh')
+          with as_file(p) as f:
+              print(f)
+              sys.exit(0 if os.path.exists(f) else 1)
+          PY
+
+  build:
+    name: Build & check sdists/wheels
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+      - name: Build dist
+        env:
+          PIP_DISABLE_PIP_VERSION_CHECK: '1'
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build twine
+          python -m build
+          twine check dist/*
+      - name: Install wheel and smoke
+        run: |
+          python -m pip install dist/*.whl
+          pgprovision --help
+          pgprovision --dry-run
+      - name: Uninstall wheel
+        run: python -m pip uninstall -y pg-provision || true
+      - name: Install sdist and smoke
+        run: |
+          python -m pip install dist/*.tar.gz
+          pgprovision --help
+          pgprovision --dry-run
+      - name: Artifact test (importlib.resources, sdist)
+        run: |
+          python - <<'PY'
+          import os, sys
+          from importlib.resources import files, as_file
+          p = files('pgprovision').joinpath('_sh', 'provision.sh')
+          with as_file(p) as f:
+              print(f)
+              sys.exit(0 if os.path.exists(f) else 1)
+          PY

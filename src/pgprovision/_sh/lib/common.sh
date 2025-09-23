@@ -16,6 +16,10 @@ run() {
 	"$@"
 }
 
+run_quiet() {
+	"$@"
+}
+
 must_run() {
 	local msg="$1"
 	shift
