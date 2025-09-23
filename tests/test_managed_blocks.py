@@ -26,7 +26,9 @@ def _first_meaningful_line(text: str) -> str:
 def test_hba_managed_header_top_singleton_preserves_vendor(tmp_path, bash):
     hba = tmp_path / "pg_hba.conf"
     # Seed with a vendor/default line below
-    hba.write_text("# vendor default\nhost all all 127.0.0.1/32 scram-sha-256\n", encoding="utf-8")
+    hba.write_text(
+        "# vendor default\nhost all all 127.0.0.1/32 scram-sha-256\n", encoding="utf-8"
+    )
 
     env = {"HBA": str(hba), "LOCAL_PEER_MAP": "localmap"}
     r1 = bash('apply_hba_policy "$HBA"', env=env)
@@ -38,10 +40,14 @@ def test_hba_managed_header_top_singleton_preserves_vendor(tmp_path, bash):
     # Header begin marker should be at the very top (allow leading blanks)
     assert text.lstrip().startswith("# pgprovision:hba begin (managed)")
     # Exactly one header block (begin and end) present
-    assert len(re.findall(r"^\s*# pgprovision:hba begin \(managed\)\s*$", text, re.M)) == 1
+    assert (
+        len(re.findall(r"^\s*# pgprovision:hba begin \(managed\)\s*$", text, re.M)) == 1
+    )
     assert len(re.findall(r"^\s*# pgprovision:hba end\s*$", text, re.M)) == 1
     # Vendor line still present after the block
-    assert re.search(r"^\s*host\s+all\s+all\s+127\.0\.0\.1/32\s+scram-sha-256\s*$", text, re.M)
+    assert re.search(
+        r"^\s*host\s+all\s+all\s+127\.0\.0\.1/32\s+scram-sha-256\s*$", text, re.M
+    )
 
 
 @pytest.mark.unit
@@ -62,7 +68,10 @@ def test_pg_ident_managed_block_entries_and_mode_preserved(tmp_path, bash):
     assert r.rc == 0, r.stderr
 
     text = ident.read_text(encoding="utf-8")
-    assert len(re.findall(r"^\s*# pgprovision:pg_ident begin \(managed\)\s*$", text, re.M)) == 1
+    assert (
+        len(re.findall(r"^\s*# pgprovision:pg_ident begin \(managed\)\s*$", text, re.M))
+        == 1
+    )
     assert len(re.findall(r"^\s*# pgprovision:pg_ident end\s*$", text, re.M)) == 1
     assert re.search(r"^\s*localmap\s+alice\s+alice_db\s*$", text, re.M)
     assert re.search(r"^\s*localmap\s+svc\s+svc\s*$", text, re.M)

@@ -1,0 +1,270 @@
+# `rhel-test-guide.md`
+
+# PostgreSQL Provisioner – RHEL/Rocky/Alma Test Guide
+
+This guide validates `provision.sh` on RHEL 8/9 (and Rocky/Alma). It assumes PGDG is used by default. It covers installation, service health, HBA policy, profiles, users/DBs, TLS, relocation, and SELinux/firewalld nuances.
+
+---
+
+## 0) Prerequisites
+
+* RHEL 8/9, Rocky 8/9, or Alma 8/9 VM with internet access.
+* Willingness to install PostgreSQL 16 (PGDG).
+* Repo layout:
+
+```
+./provision.sh
+./lib/common.sh
+./lib/hba.sh
+./lib/profile.sh
+./os/rhel.sh
+./profiles/                # created during tests
+```
+
+**Recommended shell setup**
+
+```bash
+sudo -s                           # run tests as root
+set -euxo pipefail
+cd /path/to/your/project          # adjust
+```
+
+> If non-root, ensure passwordless sudo and that helpers writing under `$PGDATA` and `/var/lib/pgsql/...` use sudo.
+
+---
+
+## 1) Dry‑run smoke test
+
+```bash
+./provision.sh --dry-run | tee ./pgprov_dryrun_rhel.log
+! grep -qE '^\+ (dnf|yum) install' ./pgprov_dryrun_rhel.log
+```
+
+---
+
+## 2) Full install (PGDG repo, packages, cluster, service)
+
+Your RHEL OS module should:
+
+* Install PGDG repo RPM.
+* Disable the AppStream PostgreSQL module.
+* Install `postgresql16`, `postgresql16-server`, and `postgresql16-contrib`.
+* Initialize and start the service.
+
+Run:
+
+```bash
+./provision.sh | tee ./pgprov_install_rhel.log
+
+systemctl status postgresql-16 --no-pager || true
+sudo -u postgres /usr/pgsql-16/bin/psql -At -c "SELECT version();"
+```
+
+**If service didn’t start:**
+
+```bash
+systemctl status postgresql-16 --no-pager -l || true
+journalctl -xeu postgresql-16 --no-pager | tail -n 100 || true
+# Initialize cluster manually if needed:
+sudo /usr/pgsql-16/bin/postgresql-16-setup initdb || true
+systemctl enable --now postgresql-16 || true
+```
+
+**Paths (PGDG on RHEL)**
+
+* Data dir: `/var/lib/pgsql/16/data`
+* Configs: `/var/lib/pgsql/16/data/postgresql.conf` (plus `pg_hba.conf`, `pg_ident.conf`)
+* Service: `postgresql-16`
+
+---
+
+## 3) HBA policy
+
+```bash
+HBA=/var/lib/pgsql/16/data/pg_hba.conf
+awk '/^# pgprovision:hba begin \(managed\)/,/^# pgprovision:hba end/' "$HBA"
+```
+
+### Socket‑only posture
+
+```bash
+SOCKET_ONLY=true ./provision.sh
+awk '/^# pgprovision:hba begin \(managed\)/,/^# pgprovision:hba end/' "$HBA" | grep -A2 'socket-only'
+```
+
+### Allow networks
+
+```bash
+ALLOW_NETWORK=true ALLOWED_CIDR="10.0.0.0/8, 192.168.1.0/24" ./provision.sh
+awk '/^# pgprovision:hba begin \(managed\)/,/^# pgprovision:hba end/' "$HBA" | grep -E '10\.0\.0\.0/8|192\.168\.1\.0/24'
+```
+
+> **Note:** Even with HBA allowing remote connections, firewalld/SELinux may still block. See Troubleshooting.
+
+---
+
+## 4) Profiles (conf.d drop‑in)
+
+Your provisioner adds `include_dir = 'conf.d'` and writes a drop‑in in the same directory as `postgresql.conf`.
+
+```bash
+mkdir -p profiles
+cat >profiles/xl-32c-256g.conf <<'EOF'
+shared_buffers=64GB
+effective_cache_size=192GB
+work_mem=32MB
+maintenance_work_mem=2GB
+wal_buffers=16MB
+max_wal_size=32GB
+checkpoint_completion_target=0.9
+default_statistics_target=250
+track_io_timing=on
+EOF
+
+PROFILE=xl-32c-256g ./provision.sh
+DROPIN=/var/lib/pgsql/16/data/conf.d/99-pgprovision.conf
+grep -E 'shared_buffers|max_wal_size|track_io_timing' "$DROPIN"
+```
+
+---
+
+## 5) User and database creation
+
+```bash
+./provision.sh --create-user devuser --create-password 'pAs$123' --create-db devdb
+
+sudo -u postgres /usr/pgsql-16/bin/psql -At -c "SELECT rolname, rolcanlogin FROM pg_roles WHERE rolname='devuser';"
+sudo -u postgres /usr/pgsql-16/bin/psql -At -c "SELECT datname, pg_get_userbyid(datdba) FROM pg_database WHERE datname='devdb';"
+```
+
+---
+
+## 6) Socket group & local peer map
+
+```bash
+ME=$(logname 2>/dev/null || echo "$SUDO_USER")
+./provision.sh --local-peer-map localmap --local-map-entry "${ME}:dev_role" --unix-socket-group pgclients
+
+getent group pgclients
+getent group pgclients | grep -E "(^|,|\s)${ME}(\s|,|$)" || true
+sudo -u postgres /usr/pgsql-16/bin/psql -At -c "SELECT rolname FROM pg_roles WHERE rolname = 'dev_role';"
+```
+
+---
+
+## 7) TLS guardrail and enablement
+
+### 7.1 Guardrail
+
+```bash
+set +e
+ENABLE_TLS=true ./provision.sh
+echo "RC=$?"
+set -e
+```
+
+### 7.2 Self-signed certs and TLS enablement
+
+```bash
+DATA_DIR=/var/lib/pgsql/16/data
+install -o postgres -g postgres -m 0700 -d "$DATA_DIR"
+openssl req -x509 -newkey rsa:2048 -nodes -keyout "$DATA_DIR/server.key" -out "$DATA_DIR/server.crt" -subj "/CN=localhost" -days 365
+chown postgres:postgres "$DATA_DIR/server.crt" "$DATA_DIR/server.key"
+chmod 0600 "$DATA_DIR/server.key"
+
+ENABLE_TLS=true ./provision.sh
+sudo -u postgres /usr/pgsql-16/bin/psql -At -c "SHOW ssl;"
+sudo -u postgres /usr/pgsql-16/bin/psql -At -c "SHOW ssl_min_protocol_version;"
+```
+
+---
+
+## 8) Custom data directory relocation (SELinux aware)
+
+> Destructive to the default cluster.
+
+```bash
+NEW_DATA="/var/lib/pgsql/16/custom-data"
+./provision.sh --data-dir "$NEW_DATA"
+sudo -u postgres /usr/pgsql-16/bin/psql -At -c "SHOW data_directory;" | grep -F "$NEW_DATA"
+```
+
+**If SELinux blocks startup**, label and restore contexts:
+
+```bash
+# install semanage if needed
+dnf -y install policycoreutils-python-utils || yum -y install policycoreutils-python
+
+semanage fcontext -a -t postgresql_db_t "${NEW_DATA}(/.*)?"
+restorecon -Rv "${NEW_DATA}"
+
+systemctl restart postgresql-16
+systemctl is-active --quiet postgresql-16 && echo "service up"
+```
+
+---
+
+## 9) Stamp file & permissions
+
+```bash
+STAMP="${NEW_DATA:-/var/lib/pgsql/16/data}/.pgprovision_provisioned.json"
+ls -l "$STAMP"
+cat "$STAMP"
+```
+
+---
+
+## 10) Restart sanity
+
+```bash
+systemctl restart postgresql-16
+systemctl is-active --quiet postgresql-16 && echo "service up"
+sudo -u postgres /usr/pgsql-16/bin/psql -At -c "SELECT 1;"
+```
+
+---
+
+## Troubleshooting
+
+* **Service didn’t start**:
+
+  ```bash
+  systemctl status postgresql-16 --no-pager -l
+  journalctl -xeu postgresql-16 --no-pager | tail -n 100
+  ```
+* **SELinux AVC denials** (custom data dir):
+
+  ```bash
+  getenforce
+  ausearch -m AVC -ts recent || true
+  # fix contexts:
+  semanage fcontext -a -t postgresql_db_t "/path/to/data(/.*)?"
+  restorecon -Rv /path/to/data
+  systemctl restart postgresql-16
+  ```
+* **firewalld blocks remote connections** (if you allowed networks in HBA):
+
+  ```bash
+  firewall-cmd --add-service=postgresql --permanent
+  firewall-cmd --reload
+  # or:
+  firewall-cmd --add-port=5432/tcp --permanent && firewall-cmd --reload
+  ```
+* **Permission denied writing under `$PGDATA`**: run as root or ensure helpers use sudo for writes under `/var/lib/pgsql/16/data`.
+
+---
+
+## Cleanup (optional)
+
+```bash
+systemctl stop postgresql-16 || true
+dnf -y remove postgresql16\* || yum -y remove postgresql16\*
+rm -rf /var/lib/pgsql /etc/yum.repos.d/pgdg-redhat-all.repo /var/log/pgsql
+# If you installed the PGDG repo RPM explicitly and want to remove it:
+rpm -qa | grep -i pgdg | xargs -r dnf -y remove || true
+groupdel pgclients || true
+```
+
+---
+
+**End of guides.**

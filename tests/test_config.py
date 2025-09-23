@@ -70,8 +70,18 @@ def test_tls_dropin_writes_ssl_options(tmp_path, bash):
     content = "\n".join(f.read_text(encoding="utf-8") for f in files)
 
     assert len(re.findall(r"^\s*ssl\s*=\s*on\s*$", content, re.M)) == 1
-    assert len(re.findall(r"^\s*ssl_min_protocol_version\s*=\s*TLSv1\.2\s*$", content, re.M)) == 1
-    assert len(re.findall(r"^\s*ssl_prefer_server_ciphers\s*=\s*on\s*$", content, re.M)) == 1
+    assert (
+        len(
+            re.findall(
+                r"^\s*ssl_min_protocol_version\s*=\s*TLSv1\.2\s*$", content, re.M
+            )
+        )
+        == 1
+    )
+    assert (
+        len(re.findall(r"^\s*ssl_prefer_server_ciphers\s*=\s*on\s*$", content, re.M))
+        == 1
+    )
 
 
 @pytest.mark.unit
@@ -93,12 +103,16 @@ def test_tls_disabled_has_no_ssl_options(tmp_path, bash):
     content = "\n".join(f.read_text(encoding="utf-8") for f in files)
 
     assert not re.search(r"^\s*ssl\s*=\s*on\s*$", content, re.M)
-    assert not re.search(r"^\s*ssl_min_protocol_version\s*=\s*TLSv1\.2\s*$", content, re.M)
+    assert not re.search(
+        r"^\s*ssl_min_protocol_version\s*=\s*TLSv1\.2\s*$", content, re.M
+    )
     assert not re.search(r"^\s*ssl_prefer_server_ciphers\s*=\s*on\s*$", content, re.M)
 
 
 @pytest.mark.unit
-@pytest.mark.skipif(sys.platform.startswith("win"), reason="POSIX-only permissions semantics")
+@pytest.mark.skipif(
+    sys.platform.startswith("win"), reason="POSIX-only permissions semantics"
+)
 def test_existing_data_dir_perms_preserved_and_stamp_json(tmp_path, bash):
     """
     write_stamp must not alter an already-existing directory’s permissions (e.g., 0700).
@@ -117,7 +131,9 @@ def test_existing_data_dir_perms_preserved_and_stamp_json(tmp_path, bash):
     assert stamp.exists(), "stamp file was not created"
     meta = json.loads(stamp.read_text(encoding="utf-8"))
     # loose structure checks (avoid coupling to env in CI)
-    assert set(["port", "listen_addresses", "repo", "allow_network", "enable_tls", "profile"]).issubset(meta.keys())
+    assert set(
+        ["port", "listen_addresses", "repo", "allow_network", "enable_tls", "profile"]
+    ).issubset(meta.keys())
     assert meta["port"] == 5432
     assert meta["listen_addresses"] == "localhost"
 
@@ -153,7 +169,11 @@ def test_write_key_value_dropin_quotes_and_commas(tmp_path, bash):
     - Both keys should appear exactly once.
     """
     dropin = tmp_path / "extra.conf"
-    env = {"F": str(dropin), "LOGP": r"%m [%p] %q%u@%d ", "SPL": "pg_stat_statements,auto_explain"}
+    env = {
+        "F": str(dropin),
+        "LOGP": r"%m [%p] %q%u@%d ",
+        "SPL": "pg_stat_statements,auto_explain",
+    }
 
     r1 = bash(
         """
@@ -169,7 +189,9 @@ def test_write_key_value_dropin_quotes_and_commas(tmp_path, bash):
     text = dropin.read_text(encoding="utf-8")
     assert re.search(r"^\s*log_line_prefix\s*=\s*'%m \[%p\] %q%u@%d '\s*$", text, re.M)
     assert re.search(
-        r"^\s*shared_preload_libraries\s*=\s*'pg_stat_statements,auto_explain'\s*$", text, re.M
+        r"^\s*shared_preload_libraries\s*=\s*'pg_stat_statements,auto_explain'\s*$",
+        text,
+        re.M,
     )
     assert len(re.findall(r"^\s*log_line_prefix\s*=", text, re.M)) == 1
     assert len(re.findall(r"^\s*shared_preload_libraries\s*=", text, re.M)) == 1
@@ -198,15 +220,34 @@ def test_apply_dropin_core_keys_idempotent(tmp_path, bash):
     assert files, "No drop-in written to conf.d"
     content = "\n".join(f.read_text(encoding="utf-8") for f in files)
 
-    assert len(re.findall(r"^\s*password_encryption\s*=\s*scram-sha-256\s*$", content, re.M)) == 1
-    assert len(re.findall(r"^\s*shared_preload_libraries\s*=\s*'pg_stat_statements'\s*$", content, re.M)) == 1
-    assert len(
-        re.findall(
-            r"^\s*log_line_prefix\s*=\s*'%m \[%p\] user=%u db=%d app=%a client=%h '\s*$",
-            content,
-            re.M,
+    assert (
+        len(
+            re.findall(
+                r"^\s*password_encryption\s*=\s*scram-sha-256\s*$", content, re.M
+            )
         )
-    ) == 1
+        == 1
+    )
+    assert (
+        len(
+            re.findall(
+                r"^\s*shared_preload_libraries\s*=\s*'pg_stat_statements'\s*$",
+                content,
+                re.M,
+            )
+        )
+        == 1
+    )
+    assert (
+        len(
+            re.findall(
+                r"^\s*log_line_prefix\s*=\s*'%m \[%p\] user=%u db=%d app=%a client=%h '\s*$",
+                content,
+                re.M,
+            )
+        )
+        == 1
+    )
 
 
 @pytest.mark.unit

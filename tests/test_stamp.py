@@ -23,4 +23,6 @@ def test_write_stamp_psql_fallback_creates_json(tmp_path, bash):
     stamp = dd / ".pgprovision_provisioned.json"
     assert stamp.exists(), "stamp json not created via fallback"
     meta = json.loads(stamp.read_text(encoding="utf-8"))
-    assert set(["port", "listen_addresses", "repo", "allow_network", "enable_tls", "profile"]).issubset(meta.keys())
+    assert set(
+        ["port", "listen_addresses", "repo", "allow_network", "enable_tls", "profile"]
+    ).issubset(meta.keys())

@@ -63,7 +63,9 @@ def _candidate_provision_paths(repo_root: Path):
 @pytest.fixture(scope="session")
 def repo_root() -> Path:
     root = os.getenv("REPO_ROOT")
-    return Path(root).resolve() if root else Path(__file__).resolve().parents[1]  # tests/..
+    return (
+        Path(root).resolve() if root else Path(__file__).resolve().parents[1]
+    )  # tests/..
 
 
 @pytest.fixture(scope="session")
@@ -105,17 +107,17 @@ def bash(provision_sh: Path) -> Callable[[str, Optional[Dict[str, str]]], BashRe
             "SUDO=();"
             "PROFILE_OVERRIDES=();"
             # [plan: Iteration 1 / FR-001..FR-003] Unit-safe elevation stubs (toggle with PGPROVISION_STUB_ELEVATION=0)
-            "if [[ \"${PGPROVISION_STUB_ELEVATION:-1}\" != \"0\" ]]; then\n"
+            'if [[ "${PGPROVISION_STUB_ELEVATION:-1}" != "0" ]]; then\n'
             "  sudo() {\n"
             "    local -a args=()\n"
             "    while (( $# )); do\n"
-            "      case \"$1\" in\n"
+            '      case "$1" in\n'
             "        -n) shift 1 ;;\n"
             "        -u) shift 2 ;;\n"
-            "        *) args+=(\"$1\"); shift ;;\n"
+            '        *) args+=("$1"); shift ;;\n'
             "      esac\n"
             "    done\n"
-            "    \"${args[@]}\"\n"
+            '    "${args[@]}"\n'
             "  }\n"
             "  chown() { return 0; }\n"
             "fi;"

@@ -8,19 +8,19 @@ _cnf_hook="/etc/apt/apt.conf.d/50command-not-found"
 _cnf_stash="/run/pgprovision-apt-stash"
 
 _disable_cnf_hook() {
-  if [[ -f "${_cnf_hook}" ]]; then
-    run install -d -m 0755 "${_cnf_stash}"
-    run mv -f "${_cnf_hook}" "${_cnf_stash}/"
-    echo "+ disabled command-not-found APT hook"
-  fi
+	if [[ -f "${_cnf_hook}" ]]; then
+		run install -d -m 0755 "${_cnf_stash}"
+		run mv -f "${_cnf_hook}" "${_cnf_stash}/"
+		echo "+ disabled command-not-found APT hook"
+	fi
 }
 
 _restore_cnf_hook() {
-  if [[ -f "${_cnf_stash}/50command-not-found" ]]; then
-    run mv -f "${_cnf_stash}/50command-not-found" "${_cnf_hook}"
-    rmdir "${_cnf_stash}" 2>/dev/null || true
-    echo "+ restored command-not-found APT hook"
-  fi
+	if [[ -f "${_cnf_stash}/50command-not-found" ]]; then
+		run mv -f "${_cnf_stash}/50command-not-found" "${_cnf_hook}"
+		rmdir "${_cnf_stash}" 2>/dev/null || true
+		echo "+ restored command-not-found APT hook"
+	fi
 }
 
 _apt_update_once() {
@@ -76,31 +76,31 @@ os_init_cluster() {
 }
 
 os_get_paths() {
-  local conf="/etc/postgresql/${PG_VERSION}/main/postgresql.conf"
-  local hba="/etc/postgresql/${PG_VERSION}/main/pg_hba.conf"
-  local ident="/etc/postgresql/${PG_VERSION}/main/pg_ident.conf"
-  local svc="postgresql@${PG_VERSION}-main"
-  local datadir=""
+	local conf="/etc/postgresql/${PG_VERSION}/main/postgresql.conf"
+	local hba="/etc/postgresql/${PG_VERSION}/main/pg_hba.conf"
+	local ident="/etc/postgresql/${PG_VERSION}/main/pg_ident.conf"
+	local svc="postgresql@${PG_VERSION}-main"
+	local datadir=""
 
-  # Preferred: ask postgresql-common
-  if command -v pg_lsclusters >/dev/null 2>&1; then
-    datadir=$(pg_lsclusters --no-header | awk '$1=="'"${PG_VERSION}"'" && $2=="main"{print $6; exit}')
-  fi
+	# Preferred: ask postgresql-common
+	if command -v pg_lsclusters >/dev/null 2>&1; then
+		datadir=$(pg_lsclusters --no-header | awk '$1=="'"${PG_VERSION}"'" && $2=="main"{print $6; exit}')
+	fi
 
-  if [[ -z "$datadir" && -r "$conf" ]]; then
-    datadir=$(
-      awk -F= '
+	if [[ -z "$datadir" && -r "$conf" ]]; then
+		datadir=$(
+			awk -F= '
         /^[[:space:]]*data_directory[[:space:]]*=/ {
           v=$2; gsub(/^[[:space:]]+|[[:space:]]+$/, "", v); gsub(/^'\''|'\''$/, "", v); gsub(/^"|"$/, "", v);
           print v; exit
         }' "$conf" 2>/dev/null || true
-    )
-  fi
+		)
+	fi
 
-  # Last resort: Debian default
-  [[ -z "$datadir" ]] && datadir="/var/lib/postgresql/${PG_VERSION}/main"
+	# Last resort: Debian default
+	[[ -z "$datadir" ]] && datadir="/var/lib/postgresql/${PG_VERSION}/main"
 
-  echo "CONF_FILE=$conf HBA_FILE=$hba IDENT_FILE=$ident DATA_DIR=$datadir SERVICE=$svc"
+	echo "CONF_FILE=$conf HBA_FILE=$hba IDENT_FILE=$ident DATA_DIR=$datadir SERVICE=$svc"
 }
 
 os_enable_and_start() {

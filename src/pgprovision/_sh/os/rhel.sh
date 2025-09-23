@@ -5,7 +5,7 @@
 : "${PG_VERSION:=16}"
 : "${REPO_KIND:=pgdg}"
 
-+_pkgmgr() {
+_pkgmgr() {
 	if command -v dnf >/dev/null 2>&1; then echo dnf; elif command -v yum >/dev/null 2>&1; then echo yum; else return 1; fi
 }
 

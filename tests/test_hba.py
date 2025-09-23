@@ -51,7 +51,10 @@ def test_hba_idempotent_default_rules(tmp_path, bash):
     text = hba.read_text(encoding="utf-8")
     assert count_hba_lines(text, "local", "all", "postgres", "peer") == 1
     assert count_hba_lines(text, "local", "all", "all", "peer", "map=localmap") == 1
-    assert count_hba_lines(text, "host", "all", "all", "127.0.0.1/32", "scram-sha-256") == 1
+    assert (
+        count_hba_lines(text, "host", "all", "all", "127.0.0.1/32", "scram-sha-256")
+        == 1
+    )
     assert count_hba_lines(text, "host", "all", "all", "::1/128", "scram-sha-256") == 1
 
 
@@ -76,7 +79,9 @@ def test_hba_adds_ipv4_cidr_without_tls(tmp_path, bash):
     r2 = bash('apply_hba_policy "$HBA"', env=env)
     assert r2.rc == 0, r2.stderr
     text2 = hba.read_text(encoding="utf-8")
-    assert count_hba_lines(text2, "host", "all", "all", "10.0.0.0/8", "scram-sha-256") == 1
+    assert (
+        count_hba_lines(text2, "host", "all", "all", "10.0.0.0/8", "scram-sha-256") == 1
+    )
 
 
 @pytest.mark.unit
@@ -99,7 +104,10 @@ def test_hba_adds_ipv4_cidr_with_tls_hostssl(tmp_path, bash):
     r2 = bash('apply_hba_policy "$HBA"', env=env)
     assert r2.rc == 0, r2.stderr
     text2 = hba.read_text(encoding="utf-8")
-    assert count_hba_lines(text2, "hostssl", "all", "all", "10.0.0.0/8", "scram-sha-256") == 1
+    assert (
+        count_hba_lines(text2, "hostssl", "all", "all", "10.0.0.0/8", "scram-sha-256")
+        == 1
+    )
 
 
 @pytest.mark.unit
@@ -119,7 +127,8 @@ def test_hba_no_network_rule_without_allowed_cidr(tmp_path, bash):
 
     # Count non-empty, non-comment lines inside the managed block (whole file in tests)
     lines = [
-        ln for ln in hba.read_text(encoding="utf-8").splitlines()
+        ln
+        for ln in hba.read_text(encoding="utf-8").splitlines()
         if ln.strip() and not ln.lstrip().startswith("#")
     ]
     assert len(lines) == 4
@@ -165,4 +174,7 @@ def test_hba_ipv6_allow_with_tls(tmp_path, bash):
     r2 = bash('apply_hba_policy "$HBA"', env=env)
     assert r2.rc == 0, r2.stderr
     text2 = hba.read_text(encoding="utf-8")
-    assert count_hba_lines(text2, "hostssl", "all", "all", "fd00::/8", "scram-sha-256") == 1
+    assert (
+        count_hba_lines(text2, "hostssl", "all", "all", "fd00::/8", "scram-sha-256")
+        == 1
+    )
