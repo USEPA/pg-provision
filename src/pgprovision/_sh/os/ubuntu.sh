@@ -25,14 +25,18 @@ _restore_cnf_hook() {
 
 _apt_update_once() {
 	if [[ "${_apt_update_once_done}" != "true" ]]; then
+		# Always restore the 'command-not-found' hook even if apt-get fails midway.
+		# Using a RETURN trap ensures cleanup on both success and failure.
+		trap '_restore_cnf_hook || true' RETURN
 		# Disable problematic APT post-invoke hook that may import apt_pkg with a mismatched python3.
 		_disable_cnf_hook || true
 		# Try update with hook suppressed, then fallback to normal update.
 		if ! run "${SUDO[@]}" apt-get -o APT::Update::Post-Invoke-Success= -y update; then
 			run "${SUDO[@]}" apt-get update
 		fi
-		_restore_cnf_hook || true
 		_apt_update_once_done="true"
+		# Optional: stop triggering the RETURN trap for all later function returns
+		trap - RETURN
 	fi
 }
 
@@ -45,12 +49,13 @@ os_prepare_repos() {
 	_apt_update_once
 	run "${SUDO[@]}" apt-get install -y curl ca-certificates gnupg lsb-release
 	run "${SUDO[@]}" install -d -m 0755 -- /etc/apt/keyrings
-	run bash -c "curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
-                 | ${SUDO[*]} gpg --yes --batch --dearmor -o /etc/apt/keyrings/postgresql.gpg"
+	run bash -c "set -o pipefail; curl -fsSL https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+        | ${SUDO[*]} gpg --yes --batch --dearmor -o /etc/apt/keyrings/postgresql.gpg"
+	run "${SUDO[@]}" chmod 0644 /etc/apt/keyrings/postgresql.gpg
 	local codename
 	codename=$(lsb_release -cs)
-	run bash -c "echo 'deb [signed-by=/etc/apt/keyrings/postgresql.gpg] http://apt.postgresql.org/pub/repos/apt ${codename}-pgdg main' \
-                 | ${SUDO[*]} tee /etc/apt/sources.list.d/pgdg.list >/dev/null"
+	run bash -c "echo 'deb [signed-by=/etc/apt/keyrings/postgresql.gpg] https://apt.postgresql.org/pub/repos/apt ${codename}-pgdg main' \
+		| ${SUDO[*]} tee /etc/apt/sources.list.d/pgdg.list >/dev/null"
 	# Ensure PGDG is visible for the subsequent install step
 	run "${SUDO[@]}" apt-get update
 }
@@ -61,22 +66,52 @@ os_install_packages() {
 }
 
 os_init_cluster() {
-	local data_dir="${1:-auto}"
-	# Ubuntu auto-creates 16 cluster when postgresql-${PG_VERSION} is installed via PGDG.
-	# Custom data dir requires cluster tooling; enforce availability and success.
-	if [[ "$data_dir" != "auto" && -n "$data_dir" ]]; then
-		if ! command -v pg_dropcluster >/dev/null 2>&1 || ! command -v pg_createcluster >/dev/null 2>&1; then
-			err "pg_dropcluster/pg_createcluster not available; cannot relocate data dir to ${data_dir}"
-			exit 2
-		fi
-		if systemctl is-active --quiet "postgresql@${PG_VERSION}-main"; then run "${SUDO[@]}" systemctl stop "postgresql@${PG_VERSION}-main"; fi
-		run "${SUDO[@]}" pg_dropcluster --stop "${PG_VERSION}" main
-		run "${SUDO[@]}" install -d -m 0700 -- "$data_dir"
-		ubuntu_apparmor_allow_datadir "$data_dir" || true # defensive: non-fatal on systems without AppArmor
-		run "${SUDO[@]}" pg_createcluster "${PG_VERSION}" main -d "$data_dir"
-	fi
-	run "${SUDO[@]}" systemctl enable --now "postgresql@${PG_VERSION}-main"
+  local data_dir="${1:-auto}"
+  # Ubuntu auto-creates the default cluster when postgresql-${PG_VERSION} is installed via PGDG.
+  # A custom data dir requires cluster tooling.
+
+  if [[ "$data_dir" != "auto" && -n "$data_dir" ]]; then
+    # Ensure the postgresql-common tools exist if we plan to move/create clusters.
+    if ! command -v pg_dropcluster >/dev/null 2>&1 || ! command -v pg_createcluster >/dev/null 2>&1; then
+      err "pg_dropcluster/pg_createcluster not available; cannot relocate data dir to ${data_dir}"
+      exit 2
+    fi
+
+    # Detect current cluster data dir (if the cluster exists at all).
+    local cur=""
+    if command -v pg_lsclusters >/dev/null 2>&1; then
+      cur=$(pg_lsclusters --no-header | awk '$1=="'"${PG_VERSION}"'" && $2=="main"{print $6; exit}')
+    fi
+
+    # --- Early return: already at desired data_dir
+    if [[ -n "$cur" && "$cur" == "$data_dir" ]]; then
+      # Nothing to relocate; just ensure the service is enabled and running.
+      run "${SUDO[@]}" systemctl enable --now "postgresql@${PG_VERSION}-main"
+      return 0
+    fi
+
+    # We need to (re)create the cluster pointing at the requested data_dir.
+    # Stop if active, then drop the existing 'main' (if present).
+    if systemctl is-active --quiet "postgresql@${PG_VERSION}-main"; then
+      run "${SUDO[@]}" systemctl stop "postgresql@${PG_VERSION}-main"
+    fi
+    # Drop only if the cluster currently exists; pg_dropcluster errors if not present.
+    if [[ -n "$cur" ]]; then
+      run "${SUDO[@]}" pg_dropcluster --stop "${PG_VERSION}" main
+    fi
+
+    # Prepare the target dir and AppArmor permissions (idempotent).
+    run "${SUDO[@]}" install -d -m 0700 -- "$data_dir"
+    ubuntu_apparmor_allow_datadir "$data_dir" || true
+
+    # Create a fresh 'main' at the requested location.
+    run "${SUDO[@]}" pg_createcluster "${PG_VERSION}" main -d "$data_dir"
+  fi
+
+  # Default path or after relocation: ensure service is enabled & started.
+  run "${SUDO[@]}" systemctl enable --now "postgresql@${PG_VERSION}-main"
 }
+
 
 os_get_paths() {
 	local conf="/etc/postgresql/${PG_VERSION}/main/postgresql.conf"
@@ -123,7 +158,7 @@ ubuntu_apparmor_allow_datadir() {
 	local local_override="/etc/apparmor.d/local/usr.lib.postgresql.postgres"
 	run "${SUDO[@]}" install -d -m 0755 -- "$(dirname "$local_override")"
 	local rule="  ${dir}/** rwk,"
-	run bash -c "printf '%s\n' \"$rule\" | ${SUDO[*]} tee -a \"$local_override\" >/dev/null"
+	run bash -c "grep -Fqx -- \"$rule\" \"$local_override\" 2>/dev/null || printf '%s\n' \"$rule\" | ${SUDO[*]} tee -a \"$local_override\" >/dev/null"
 	if command -v apparmor_parser >/dev/null 2>&1 && [[ -f "$profile" ]]; then
 		run "${SUDO[@]}" apparmor_parser -r "$profile" || warn "apparmor_parser reload failed"
 	else
