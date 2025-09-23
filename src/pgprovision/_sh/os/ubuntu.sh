@@ -66,52 +66,51 @@ os_install_packages() {
 }
 
 os_init_cluster() {
-  local data_dir="${1:-auto}"
-  # Ubuntu auto-creates the default cluster when postgresql-${PG_VERSION} is installed via PGDG.
-  # A custom data dir requires cluster tooling.
+	local data_dir="${1:-auto}"
+	# Ubuntu auto-creates the default cluster when postgresql-${PG_VERSION} is installed via PGDG.
+	# A custom data dir requires cluster tooling.
 
-  if [[ "$data_dir" != "auto" && -n "$data_dir" ]]; then
-    # Ensure the postgresql-common tools exist if we plan to move/create clusters.
-    if ! command -v pg_dropcluster >/dev/null 2>&1 || ! command -v pg_createcluster >/dev/null 2>&1; then
-      err "pg_dropcluster/pg_createcluster not available; cannot relocate data dir to ${data_dir}"
-      exit 2
-    fi
+	if [[ "$data_dir" != "auto" && -n "$data_dir" ]]; then
+		# Ensure the postgresql-common tools exist if we plan to move/create clusters.
+		if ! command -v pg_dropcluster >/dev/null 2>&1 || ! command -v pg_createcluster >/dev/null 2>&1; then
+			err "pg_dropcluster/pg_createcluster not available; cannot relocate data dir to ${data_dir}"
+			exit 2
+		fi
 
-    # Detect current cluster data dir (if the cluster exists at all).
-    local cur=""
-    if command -v pg_lsclusters >/dev/null 2>&1; then
-      cur=$(pg_lsclusters --no-header | awk '$1=="'"${PG_VERSION}"'" && $2=="main"{print $6; exit}')
-    fi
+		# Detect current cluster data dir (if the cluster exists at all).
+		local cur=""
+		if command -v pg_lsclusters >/dev/null 2>&1; then
+			cur=$(pg_lsclusters --no-header | awk '$1=="'"${PG_VERSION}"'" && $2=="main"{print $6; exit}')
+		fi
 
-    # --- Early return: already at desired data_dir
-    if [[ -n "$cur" && "$cur" == "$data_dir" ]]; then
-      # Nothing to relocate; just ensure the service is enabled and running.
-      run "${SUDO[@]}" systemctl enable --now "postgresql@${PG_VERSION}-main"
-      return 0
-    fi
+		# --- Early return: already at desired data_dir
+		if [[ -n "$cur" && "$cur" == "$data_dir" ]]; then
+			# Nothing to relocate; just ensure the service is enabled and running.
+			run "${SUDO[@]}" systemctl enable --now "postgresql@${PG_VERSION}-main"
+			return 0
+		fi
 
-    # We need to (re)create the cluster pointing at the requested data_dir.
-    # Stop if active, then drop the existing 'main' (if present).
-    if systemctl is-active --quiet "postgresql@${PG_VERSION}-main"; then
-      run "${SUDO[@]}" systemctl stop "postgresql@${PG_VERSION}-main"
-    fi
-    # Drop only if the cluster currently exists; pg_dropcluster errors if not present.
-    if [[ -n "$cur" ]]; then
-      run "${SUDO[@]}" pg_dropcluster --stop "${PG_VERSION}" main
-    fi
+		# We need to (re)create the cluster pointing at the requested data_dir.
+		# Stop if active, then drop the existing 'main' (if present).
+		if systemctl is-active --quiet "postgresql@${PG_VERSION}-main"; then
+			run "${SUDO[@]}" systemctl stop "postgresql@${PG_VERSION}-main"
+		fi
+		# Drop only if the cluster currently exists; pg_dropcluster errors if not present.
+		if [[ -n "$cur" ]]; then
+			run "${SUDO[@]}" pg_dropcluster --stop "${PG_VERSION}" main
+		fi
 
-    # Prepare the target dir and AppArmor permissions (idempotent).
-    run "${SUDO[@]}" install -d -m 0700 -- "$data_dir"
-    ubuntu_apparmor_allow_datadir "$data_dir" || true
+		# Prepare the target dir and AppArmor permissions (idempotent).
+		run "${SUDO[@]}" install -d -m 0700 -- "$data_dir"
+		ubuntu_apparmor_allow_datadir "$data_dir" || true
 
-    # Create a fresh 'main' at the requested location.
-    run "${SUDO[@]}" pg_createcluster "${PG_VERSION}" main -d "$data_dir"
-  fi
+		# Create a fresh 'main' at the requested location.
+		run "${SUDO[@]}" pg_createcluster "${PG_VERSION}" main -d "$data_dir"
+	fi
 
-  # Default path or after relocation: ensure service is enabled & started.
-  run "${SUDO[@]}" systemctl enable --now "postgresql@${PG_VERSION}-main"
+	# Default path or after relocation: ensure service is enabled & started.
+	run "${SUDO[@]}" systemctl enable --now "postgresql@${PG_VERSION}-main"
 }
-
 
 os_get_paths() {
 	local conf="/etc/postgresql/${PG_VERSION}/main/postgresql.conf"

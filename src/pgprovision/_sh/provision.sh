@@ -330,15 +330,15 @@ apply_dropin_config() {
 	fi
 
 	if [[ "$ENABLE_TLS" == "true" ]]; then
-	write_key_value_dropin "$dropin" ssl on
-	write_key_value_dropin "$dropin" ssl_min_protocol_version "TLSv1.2"
-	write_key_value_dropin "$dropin" ssl_prefer_server_ciphers on
+		write_key_value_dropin "$dropin" ssl on
+		write_key_value_dropin "$dropin" ssl_min_protocol_version "TLSv1.2"
+		write_key_value_dropin "$dropin" ssl_prefer_server_ciphers on
 	else
-	# Ensure we don’t carry a stale TLS-on from a previous run
-	write_key_value_dropin "$dropin" ssl off
-	# Optional: remove TLS-only keys so default server settings apply cleanly
-	_as_root sed -i -E '/^[[:space:]]*ssl_min_protocol_version[[:space:]]*=/d' "$dropin"
-	_as_root sed -i -E '/^[[:space:]]*ssl_prefer_server_ciphers[[:space:]]*=/d' "$dropin"
+		# Ensure we don’t carry a stale TLS-on from a previous run
+		write_key_value_dropin "$dropin" ssl off
+		# Optional: remove TLS-only keys so default server settings apply cleanly
+		_as_root sed -i -E '/^[[:space:]]*ssl_min_protocol_version[[:space:]]*=/d' "$dropin"
+		_as_root sed -i -E '/^[[:space:]]*ssl_prefer_server_ciphers[[:space:]]*=/d' "$dropin"
 	fi
 
 	# Tighten permissions on drop-in to match/confine to base conf owner and 0600 mode

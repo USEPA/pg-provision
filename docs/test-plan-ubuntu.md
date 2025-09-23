@@ -14,7 +14,7 @@ ______________________________________________________________________
   pip install pg-provision
   # sanity
   pgprovision --help
- ```
+```
 
 **Recommended shell setup**
 
@@ -249,8 +249,11 @@ apt-get autoremove -y
 rm -rf /var/lib/postgresql /etc/postgresql /var/log/postgresql
 groupdel pgclients || true
 ```
+
 ______________________________________________________________________
+
 ## Provisioning Idempotency Testing (Ubuntu)
+
 *Proves we can re-run provisioning without breaking anything (idempotent, no drift).*
 
 # Run as root or with sudo.
