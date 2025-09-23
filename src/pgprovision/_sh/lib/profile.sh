@@ -1,3 +1,5 @@
+# shellcheck shell=bash
+
 load_profile_overrides() {
 	PROFILE_OVERRIDES=()
 	[[ -z "${PROFILE:-}" ]] && return 0

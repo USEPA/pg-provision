@@ -35,6 +35,9 @@ jobs:
         python: ['3.9', '3.10', '3.11', '3.12', '3.13']
     steps:
       - uses: actions/checkout@v4
+        with:
+           fetch-depth: 0
+           fetch-tags: true
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
@@ -46,7 +49,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -U pytest build twine
       - name: Run pytest
-        run: pytest -q    
+        run: pytest -q
       - name: "Smoke: pgprovision --dry-run"
         run: |
           python -m pip install .
@@ -67,19 +70,30 @@ jobs:
     runs-on: ubuntu-latest
     container:
       image: rockylinux:9
+    env:
+      PIP_DISABLE_PIP_VERSION_CHECK: '1'
+      PIP_CACHE_DIR: /tmp/pip-cache
     steps:
-      - uses: actions/checkout@v4
-      - name: Install Python and tools
+      - name: Install git before checkout (enables full clone)
         run: |
           set -euxo pipefail
           dnf -y update || true
-          dnf -y install python3 python3-pip git sudo
+          dnf -y install git
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - name: Install Python and tools
+        run: |
+          set -euxo pipefail
+          dnf -y install python3 python3-pip sudo
           python3 -m pip install --upgrade pip
       - name: Install package
+        env:
+          SETUPTOOLS_SCM_PRETEND_VERSION_FOR_PG_PROVISION: 0.0.0.dev${{ github.run_number }}+g${{ github.sha }}
         run: python3 -m pip install .
       - name: "Smoke: pgprovision --dry-run"
         run: pgprovision --dry-run
-
       - name: "Artifact test (importlib.resources)"
         run: |
           python3 - <<'PY'
@@ -90,6 +104,7 @@ jobs:
               print(f)
               sys.exit(0 if os.path.exists(f) else 1)
           PY
+
 
   build:
     name: Build & check sdists/wheels

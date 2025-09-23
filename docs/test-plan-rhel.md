@@ -2,13 +2,13 @@
 
 This guide validates the **pg-provision** package on RHEL 8/9 (and Rocky/Alma). It assumes PGDG is used by default. It covers installation, service health, HBA policy, profiles, users/DBs, TLS, relocation, and SELinux/firewalld nuances.
 
----
+______________________________________________________________________
 
 ## 0) Prerequisites
 
-* RHEL 8/9, Rocky 8/9, or Alma 8/9 VM with internet access.
-* Willingness to install PostgreSQL 16 (PGDG).
-* Install the package (system or venv):
+- RHEL 8/9, Rocky 8/9, or Alma 8/9 VM with internet access.
+- Willingness to install PostgreSQL 16 (PGDG).
+- Install the package (system or venv):
   ```bash
   pip install pg-provision
   # sanity
@@ -23,8 +23,19 @@ set -euxo pipefail
 ```
 
 > If non-root, ensure passwordless sudo and that helpers writing under `$PGDATA` and `/var/lib/pgsql/...` use sudo.
+> **Important — CLI behavior:** `pgprovision` prints usage and exits if called with **no arguments**. Environment variables alone do **not** trigger execution. Include at least one flag. This guide uses **CLI flags that mirror defaults** (e.g., `--pg-version 16`) to match `provision.sh` with no args.
 
----
+**CLI ⇄ Env quick map**
+
+- `--socket-only` ⇄ `SOCKET_ONLY=true`
+- `--allow-network` ⇄ `ALLOW_NETWORK=true`
+- `--allowed-cidr` / `--allowed-cidr-v6` ⇄ `ALLOWED_CIDR` / `ALLOWED_CIDR_V6`
+- `--profile NAME` ⇄ `PROFILE=NAME`
+- `--enable-tls` ⇄ `ENABLE_TLS=true`
+- `--data-dir PATH|auto` ⇄ `DATA_DIR=...`
+- `--create-user/--create-db/--create-password` ⇄ `CREATE_USER/CREATE_DB/CREATE_PASSWORD` (prefer `CREATE_PASSWORD_FILE` for secrets)
+
+______________________________________________________________________
 
 ## 1) Dry‑run smoke test
 
@@ -34,21 +45,21 @@ pgprovision --dry-run | tee ./pgprov_dryrun_rhel.log
 ! grep -qE '(^|[[:space:]])(dnf|yum)[[:space:]]+install([[:space:]]|$)' ./pgprov_dryrun_rhel.log
 ```
 
----
+______________________________________________________________________
 
 ## 2) Full install (PGDG repo, packages, cluster, service)
 
 The provisioner should:
 
-* Install PGDG repo RPM.
-* Disable the AppStream PostgreSQL module.
-* Install `postgresql16`, `postgresql16-server`, and `postgresql16-contrib`.
-* Initialize and start the service.
+- Install PGDG repo RPM.
+- Disable the AppStream PostgreSQL module.
+- Install `postgresql16`, `postgresql16-server`, and `postgresql16-contrib`.
+- Initialize and start the service.
 
-Run:
+Run (include a neutral default flag to trigger execution):
 
 ```bash
-pgprovision | tee ./pgprov_install_rhel.log
+pgprovision --pg-version 16 | tee ./pgprov_install_rhel.log
 
 systemctl status postgresql-16 --no-pager || true
 sudo -u postgres /usr/pgsql-16/bin/psql -At -c "SELECT version();"
@@ -66,11 +77,11 @@ systemctl enable --now postgresql-16 || true
 
 **Paths (PGDG on RHEL)**
 
-* Data dir: `/var/lib/pgsql/16/data`
-* Configs: `/var/lib/pgsql/16/data/postgresql.conf` (plus `pg_hba.conf`, `pg_ident.conf`)
-* Service: `postgresql-16`
+- Data dir: `/var/lib/pgsql/16/data`
+- Configs: `/var/lib/pgsql/16/data/postgresql.conf` (plus `pg_hba.conf`, `pg_ident.conf`)
+- Service: `postgresql-16`
 
----
+______________________________________________________________________
 
 ## 3) HBA policy
 
@@ -82,20 +93,20 @@ awk '/^# pgprovision:hba begin \(managed\)/,/^# pgprovision:hba end/' "$HBA"
 ### Socket‑only posture
 
 ```bash
-SOCKET_ONLY=true pgprovision
+pgprovision --socket-only
 awk '/^# pgprovision:hba begin \(managed\)/,/^# pgprovision:hba end/' "$HBA" | grep -A2 'socket-only'
 ```
 
 ### Allow networks
 
 ```bash
-ALLOW_NETWORK=true ALLOWED_CIDR="10.0.0.0/8, 192.168.1.0/24" pgprovision
+pgprovision --allow-network --allowed-cidr "10.0.0.0/8, 192.168.1.0/24"
 awk '/^# pgprovision:hba begin \(managed\)/,/^# pgprovision:hba end/' "$HBA" | grep -E '10\.0\.0\.0/8|192\.168\.1\.0/24'
 ```
 
 > **Note:** Even with HBA allowing remote connections, firewalld/SELinux may still block. See Troubleshooting.
 
----
+______________________________________________________________________
 
 ## 4) Profiles (conf.d drop‑in)
 
@@ -115,12 +126,12 @@ default_statistics_target=250
 track_io_timing=on
 EOF
 
-PROFILE=xl-32c-256g pgprovision
+pgprovision --profile xl-32c-256g
 DROPIN=/var/lib/pgsql/16/data/conf.d/99-pgprovision.conf
 grep -E 'shared_buffers|max_wal_size|track_io_timing' "$DROPIN"
 ```
 
----
+______________________________________________________________________
 
 ## 5) User and database creation
 
@@ -131,7 +142,7 @@ sudo -u postgres /usr/pgsql-16/bin/psql -At -c "SELECT rolname, rolcanlogin FROM
 sudo -u postgres /usr/pgsql-16/bin/psql -At -c "SELECT datname, pg_get_userbyid(datdba) FROM pg_database WHERE datname='devdb';"
 ```
 
----
+______________________________________________________________________
 
 ## 6) Socket group & local peer map
 
@@ -144,7 +155,7 @@ getent group pgclients | grep -E "(^|,|\\s)${ME}(\\s|,|$)" || true
 sudo -u postgres /usr/pgsql-16/bin/psql -At -c "SELECT rolname FROM pg_roles WHERE rolname = 'dev_role';"
 ```
 
----
+______________________________________________________________________
 
 ## 7) TLS guardrail and enablement
 
@@ -152,7 +163,7 @@ sudo -u postgres /usr/pgsql-16/bin/psql -At -c "SELECT rolname FROM pg_roles WHE
 
 ```bash
 set +e
-ENABLE_TLS=true pgprovision
+pgprovision --enable-tls
 echo "RC=$?"
 set -e
 ```
@@ -166,12 +177,12 @@ openssl req -x509 -newkey rsa:2048 -nodes -keyout "$DATA_DIR/server.key" -out "$
 chown postgres:postgres "$DATA_DIR/server.crt" "$DATA_DIR/server.key"
 chmod 0600 "$DATA_DIR/server.key"
 
-ENABLE_TLS=true pgprovision
+pgprovision --enable-tls
 sudo -u postgres /usr/pgsql-16/bin/psql -At -c "SHOW ssl;"
 sudo -u postgres /usr/pgsql-16/bin/psql -At -c "SHOW ssl_min_protocol_version;"
 ```
 
----
+______________________________________________________________________
 
 ## 8) Custom data directory relocation (SELinux aware)
 
@@ -196,7 +207,7 @@ systemctl restart postgresql-16
 systemctl is-active --quiet postgresql-16 && echo "service up"
 ```
 
----
+______________________________________________________________________
 
 ## 9) Stamp file & permissions
 
@@ -206,7 +217,7 @@ ls -l "$STAMP"
 cat "$STAMP"
 ```
 
----
+______________________________________________________________________
 
 ## 10) Restart sanity
 
@@ -216,17 +227,18 @@ systemctl is-active --quiet postgresql-16 && echo "service up"
 sudo -u postgres /usr/pgsql-16/bin/psql -At -c "SELECT 1;"
 ```
 
----
+______________________________________________________________________
 
 ## Troubleshooting
 
-* **Service didn’t start**:
+- **Service didn’t start**:
 
   ```bash
   systemctl status postgresql-16 --no-pager -l
   journalctl -xeu postgresql-16 --no-pager | tail -n 100
   ```
-* **SELinux AVC denials** (custom data dir):
+
+- **SELinux AVC denials** (custom data dir):
 
   ```bash
   getenforce
@@ -236,7 +248,8 @@ sudo -u postgres /usr/pgsql-16/bin/psql -At -c "SELECT 1;"
   restorecon -Rv /path/to/data
   systemctl restart postgresql-16
   ```
-* **firewalld blocks remote connections** (if you allowed networks in HBA):
+
+- **firewalld blocks remote connections** (if you allowed networks in HBA):
 
   ```bash
   firewall-cmd --add-service=postgresql --permanent
@@ -244,9 +257,10 @@ sudo -u postgres /usr/pgsql-16/bin/psql -At -c "SELECT 1;"
   # or:
   firewall-cmd --add-port=5432/tcp --permanent && firewall-cmd --reload
   ```
-* **Permission denied writing under `$PGDATA`**: run as root or ensure helpers use sudo for writes under `/var/lib/pgsql/16/data`.
 
----
+- **Permission denied writing under `$PGDATA`**: run as root or ensure helpers use sudo for writes under `/var/lib/pgsql/16/data`.
+
+______________________________________________________________________
 
 ## Cleanup (optional)
 
@@ -259,6 +273,6 @@ rpm -qa | grep -i pgdg | xargs -r dnf -y remove || true
 groupdel pgclients || true
 ```
 
----
+______________________________________________________________________
 
 **End of guides.**

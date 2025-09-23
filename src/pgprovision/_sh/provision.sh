@@ -40,10 +40,12 @@ os_detect() {
 		err "$osrel not found"
 		exit 2
 	}
-	# shellcheck disable=SC1091
+	# shellcheck disable=SC1090,SC1091
 	. "$osrel"
 
+	# shellcheck disable=SC2034
 	OS_VERSION_ID="${VERSION_ID:-}"
+	# shellcheck disable=SC2034
 	OS_CODENAME="${UBUNTU_CODENAME:-${VERSION_CODENAME:-}}"
 
 	local tokens="${ID:-} ${ID_LIKE:-}"
@@ -331,6 +333,12 @@ apply_dropin_config() {
 		write_key_value_dropin "$dropin" ssl on
 		write_key_value_dropin "$dropin" ssl_min_protocol_version "TLSv1.2"
 		write_key_value_dropin "$dropin" ssl_prefer_server_ciphers on
+	else
+		# Ensure we don’t carry a stale TLS-on from a previous run
+		write_key_value_dropin "$dropin" ssl off
+		# Optional: remove TLS-only keys so default server settings apply cleanly
+		_as_root sed -i -E '/^[[:space:]]*ssl_min_protocol_version[[:space:]]*=/d' "$dropin"
+		_as_root sed -i -E '/^[[:space:]]*ssl_prefer_server_ciphers[[:space:]]*=/d' "$dropin"
 	fi
 
 	# Tighten permissions on drop-in to match/confine to base conf owner and 0600 mode
@@ -568,7 +576,8 @@ write_stamp() {
   \"repo\": \"${REPO_KIND}\",
   \"allow_network\": ${ALLOW_NETWORK},
   \"enable_tls\": ${ENABLE_TLS},
-  \"profile\": \"${PROFILE}\"
+  \"profile\": \"${PROFILE}\",
+\"data_directory\": \"${data_dir}\"
 }
 JSON"
 	if [[ -n "${CONF_FILE:-}" && -f "$CONF_FILE" ]]; then
@@ -605,7 +614,16 @@ main() {
 
 	# Resolve paths
 	eval "$(os_get_paths)" # sets CONF_FILE, HBA_FILE, IDENT_FILE, DATA_DIR, SERVICE
+	# shellcheck disable=SC2153,SC2154
 	log "CONF=${CONF_FILE} HBA=${HBA_FILE} IDENT=${IDENT_FILE:-unknown} DATA=${DATA_DIR} SERVICE=${SERVICE}"
+
+	# Guardrail first: if TLS requested but certs aren’t present, bail BEFORE writing config.
+	if [[ "$ENABLE_TLS" == "true" ]]; then
+		if [[ ! -r "${DATA_DIR}/server.crt" || ! -r "${DATA_DIR}/server.key" ]]; then
+			err "TLS enabled but ${DATA_DIR}/server.crt or ${DATA_DIR}/server.key missing"
+			exit 1
+		fi
+	fi
 
 	load_profile_overrides
 	apply_dropin_config "$CONF_FILE" "$DATA_DIR"
@@ -617,14 +635,6 @@ main() {
 		# Ensure pg_ident.conf attributes are tight even if created fresh
 		soft_run "align owner of $IDENT_FILE to $CONF_FILE" "${SUDO[@]}" chown --reference "$CONF_FILE" "$IDENT_FILE"
 		must_run "chmod 0600 $IDENT_FILE" "${SUDO[@]}" chmod 0600 "$IDENT_FILE"
-	fi
-
-	# If TLS is requested, ensure cert/key exist before restart
-	if [[ "$ENABLE_TLS" == "true" ]]; then
-		if [[ ! -r "${DATA_DIR}/server.crt" || ! -r "${DATA_DIR}/server.key" ]]; then
-			err "TLS enabled but ${DATA_DIR}/server.crt or ${DATA_DIR}/server.key missing"
-			exit 1
-		fi
 	fi
 
 	os_restart "$SERVICE"
