@@ -18,7 +18,7 @@ def test_create_user_password_not_in_argv(tmp_path, bash):
         "CAP": str(cap),
         "CREATE_USER": "alice",
         "CREATE_DB": "testdb",
-        "CREATE_PASSWORD": "s3cr3t!",
+        "CREATE_PASSWORD": "s3cr3t!",  # pragma: allowlist secret
     }
     script = r"""
       CAP="${CAP:?}"

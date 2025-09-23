@@ -38,6 +38,9 @@ _apt_update_once() {
 
 os_prepare_repos() {
 	local repo_kind="${1:-pgdg}"
+	if [[ "$repo_kind" != "pgdg" ]]; then
+		warn "Ubuntu path supports only --repo=pgdg; ignoring --repo=${repo_kind}."
+	fi
 
 	_apt_update_once
 	run "${SUDO[@]}" apt-get install -y curl ca-certificates gnupg lsb-release

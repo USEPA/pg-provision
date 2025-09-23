@@ -19,7 +19,8 @@ _rhel_service_name() {
 }
 
 _rhel_default_pgdata_for_service() {
-	local svc="$(_rhel_service_name)"
+	local svc
+	svc="$(_rhel_service_name)"
 	if [[ "$svc" =~ postgresql-[0-9]+ ]]; then
 		echo "/var/lib/pgsql/${PG_VERSION}/data"
 	else
@@ -95,7 +96,8 @@ os_install_packages() {
 
 os_init_cluster() {
 	local data_dir="${1:-auto}"
-	local svc="$(_rhel_service_name)"
+	local svc
+	svc="$(_rhel_service_name)"
 	# Choose setup command depending on packaging
 	local -a setup_cmd=()
 	if command -v postgresql-setup >/dev/null 2>&1 && [[ "$svc" == "postgresql" ]]; then
@@ -109,7 +111,8 @@ os_init_cluster() {
 			run "${setup_cmd[@]}"
 		else
 			# Fallback to initdb if setup helper unavailable
-			local pgdata="$(_rhel_default_pgdata_for_service)"
+			local pgdata
+			pgdata="$(_rhel_default_pgdata_for_service)"
 			must_run "create PGDATA" "${SUDO[@]}" install -d -m 0700 -- "$pgdata"
 			must_run "chown PGDATA to postgres" "${SUDO[@]}" chown -R postgres:postgres -- "$pgdata"
 			must_run "initdb default PGDATA" "${SUDO[@]}" -u postgres initdb -D "$pgdata"
@@ -134,8 +137,10 @@ os_init_cluster() {
 }
 
 os_get_paths() {
-	local svc="$(_rhel_service_name)"
-	local pgdata="$(_rhel_default_pgdata_for_service)"
+	local svc
+	svc="$(_rhel_service_name)"
+	local pgdata
+	pgdata="$(_rhel_default_pgdata_for_service)"
 	local override="/etc/systemd/system/${svc}.service.d/override.conf"
 	if [[ -f "$override" ]] && grep -q '^Environment=PGDATA=' "$override"; then
 		pgdata=$(sed -n 's/^Environment=PGDATA=\(.*\)$/\1/p' "$override" | tail -n1)
@@ -144,10 +149,12 @@ os_get_paths() {
 }
 
 os_enable_and_start() {
-	local svc="$(_rhel_service_name)"
+	local svc
+	svc="$(_rhel_service_name)"
 	run "${SUDO[@]}" systemctl enable --now "$svc"
 }
 os_restart() {
-	local svc="$(_rhel_service_name)"
+	local svc
+	svc="$(_rhel_service_name)"
 	run "${SUDO[@]}" systemctl restart "$svc"
 }

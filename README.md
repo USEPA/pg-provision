@@ -35,12 +35,14 @@ pgprovision --dry-run
 - See the test guides for end-to-end provisioning scenarios.
 
 ### Secrets
+
 For non-interactive provisioning without leaking passwords, prefer a file-based secret and avoid passing passwords on the command line:
 
 ```
 CREATE_PASSWORD_FILE=/run/secrets/pgpass \
 pgprovision --create-user app --create-db app
 ```
+
 This prevents secrets from appearing in argv or logs.
 
 ## Project Links

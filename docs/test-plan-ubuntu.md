@@ -2,13 +2,13 @@
 
 This guide validates the **pg-provision** package on Ubuntu 22.04/24.04 using the PGDG repository. It covers installation, service health, HBA policy, profiles, users/DBs, TLS, and data directory relocation.
 
----
+______________________________________________________________________
 
 ## 0) Prerequisites
 
-* Ubuntu VM with internet access.
-* Willingness to install PostgreSQL 16 (PGDG).
-* Install the package (system or venv):
+- Ubuntu VM with internet access.
+- Willingness to install PostgreSQL 16 (PGDG).
+- Install the package (system or venv):
   ```bash
   pip install pg-provision
   # sanity
@@ -25,7 +25,7 @@ export DEBIAN_FRONTEND=noninteractive
 
 > Non-root runs require passwordless sudo and helpers that use sudo for writes under `/etc/postgresql/...`.
 
----
+______________________________________________________________________
 
 ## 1) Dry‑run smoke test
 
@@ -34,9 +34,10 @@ pgprovision --dry-run | tee ./pgprov_dryrun.log
 # Assert: dry-run must not try to install packages
 ! grep -qE '(^|[[:space:]])apt(-get)?[[:space:]]+install([[:space:]]|$)' ./pgprov_dryrun.log
 ```
+
 **Expect:** clear note that provisioning is for Ubuntu and **no** `apt install` lines executed.
 
----
+______________________________________________________________________
 
 ## 2) Full install (PGDG repo, packages, cluster, service)
 
@@ -58,7 +59,7 @@ sudo pg_createcluster 16 main || true
 sudo pg_ctlcluster 16 main start || true
 ```
 
----
+______________________________________________________________________
 
 ## 3) HBA policy
 
@@ -83,7 +84,7 @@ ALLOW_NETWORK=true ALLOWED_CIDR="10.0.0.0/8, 192.168.1.0/24" pgprovision
 awk '/^# pgprovision:hba begin \(managed\)/,/^# pgprovision:hba end/' "$HBA" | grep -E '10\.0\.0\.0/8|192\.168\.1\.0/24'
 ```
 
----
+______________________________________________________________________
 
 ## 4) Profiles (conf.d drop‑in)
 
@@ -106,7 +107,7 @@ DROPIN=/etc/postgresql/16/main/conf.d/99-pgprovision.conf
 grep -E 'shared_buffers|max_wal_size|track_io_timing' "$DROPIN"
 ```
 
----
+______________________________________________________________________
 
 ## 5) User and database creation
 
@@ -117,7 +118,7 @@ sudo -u postgres psql -At -c "SELECT rolname, rolcanlogin FROM pg_roles WHERE ro
 sudo -u postgres psql -At -c "SELECT datname, pg_get_userbyid(datdba) FROM pg_database WHERE datname='devdb';"
 ```
 
----
+______________________________________________________________________
 
 ## 6) Socket group & local peer map
 
@@ -132,7 +133,7 @@ sudo -u postgres psql -At -c "SELECT rolname FROM pg_roles WHERE rolname = 'dev_
 
 > Your current shell may not reflect new group membership until you re‑login. `getent` confirms membership.
 
----
+______________________________________________________________________
 
 ## 7) TLS guardrail and enablement
 
@@ -159,7 +160,7 @@ sudo -u postgres psql -At -c "SHOW ssl;"
 sudo -u postgres psql -At -c "SHOW ssl_min_protocol_version;"
 ```
 
----
+______________________________________________________________________
 
 ## 8) Custom data directory relocation
 
@@ -171,7 +172,7 @@ pgprovision --data-dir "$NEW_DATA"
 sudo -u postgres psql -At -c "SHOW data_directory;" | grep -F "$NEW_DATA"
 ```
 
----
+______________________________________________________________________
 
 ## 9) Stamp file & permissions
 
@@ -181,7 +182,7 @@ ls -l "$STAMP"
 cat "$STAMP"
 ```
 
----
+______________________________________________________________________
 
 ## 10) Restart sanity
 
@@ -191,11 +192,11 @@ systemctl is-active --quiet postgresql@16-main && echo "service up"
 sudo -u postgres psql -At -c "SELECT 1;"
 ```
 
----
+______________________________________________________________________
 
 ## Troubleshooting
 
-* **`tee: Permission denied`**: remove root‑owned file or tee to a path you own:
+- **`tee: Permission denied`**: remove root‑owned file or tee to a path you own:
 
   ```bash
   sudo rm -f /tmp/pgprov_install.log
@@ -203,7 +204,8 @@ sudo -u postgres psql -At -c "SELECT 1;"
   # or:
   pgprovision | sudo tee /tmp/pgprov_install.log >/dev/null
   ```
-* **Service didn’t start**:
+
+- **Service didn’t start**:
 
   ```bash
   systemctl status postgresql@16-main --no-pager -l
@@ -212,9 +214,10 @@ sudo -u postgres psql -At -c "SELECT 1;"
   sudo pg_createcluster 16 main || true
   sudo pg_ctlcluster 16 main start || true
   ```
-* **Permission denied writing `/etc/postgresql/...`**: run as root or ensure helpers use sudo for writes.
 
----
+- **Permission denied writing `/etc/postgresql/...`**: run as root or ensure helpers use sudo for writes.
+
+______________________________________________________________________
 
 ## Cleanup (optional)
 

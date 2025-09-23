@@ -40,10 +40,12 @@ os_detect() {
 		err "$osrel not found"
 		exit 2
 	}
-	# shellcheck disable=SC1091
+	# shellcheck disable=SC1090,SC1091
 	. "$osrel"
 
+	# shellcheck disable=SC2034
 	OS_VERSION_ID="${VERSION_ID:-}"
+	# shellcheck disable=SC2034
 	OS_CODENAME="${UBUNTU_CODENAME:-${VERSION_CODENAME:-}}"
 
 	local tokens="${ID:-} ${ID_LIKE:-}"
@@ -605,6 +607,7 @@ main() {
 
 	# Resolve paths
 	eval "$(os_get_paths)" # sets CONF_FILE, HBA_FILE, IDENT_FILE, DATA_DIR, SERVICE
+	# shellcheck disable=SC2153,SC2154
 	log "CONF=${CONF_FILE} HBA=${HBA_FILE} IDENT=${IDENT_FILE:-unknown} DATA=${DATA_DIR} SERVICE=${SERVICE}"
 
 	load_profile_overrides

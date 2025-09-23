@@ -9,16 +9,17 @@ def _script_path(name: str) -> str:
     return str(resources.files("pgprovision._sh").joinpath(name))
 
 
-def _ensure_root(cmd):
-    # If not root, try to run with sudo -n (non-interactive). Fall back to direct exec if already root.
+def _needs_root(passthrough_args):
     if os.geteuid() == 0:
-        return cmd
-    return ["sudo", "-n", "--"] + cmd
+        return False
+    args = set(passthrough_args or [])
+    return not ({"--help", "-h", "--dry-run"} & args)
 
 
 def _run_script(script_rel: str, passthrough_args):
     script = _script_path(script_rel)
-    cmd = _ensure_root(["/usr/bin/env", "bash", script] + passthrough_args)
+    base = ["/usr/bin/env", "bash", script] + list(passthrough_args or [])
+    cmd = (["sudo", "-n", "--"] + base) if _needs_root(passthrough_args) else base
     # Preserve current env; let the bash scripts parse flags/env-files
     proc = subprocess.run(cmd)
     return proc.returncode

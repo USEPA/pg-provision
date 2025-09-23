@@ -8,12 +8,19 @@ Pytest fixtures and helpers for the pgprovision test suite (migrated).
 """
 
 import os
+import sys
 import shutil
 import subprocess
 from pathlib import Path
 from typing import Callable, Dict, NamedTuple, Optional
 
 import pytest
+
+
+# Ensure importing pgprovision from src without installing
+_SRC = (Path(__file__).resolve().parents[1] / "src").as_posix()
+if _SRC not in sys.path:
+    sys.path.insert(0, _SRC)
 
 
 def pytest_configure(config):
