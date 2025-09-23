@@ -24,6 +24,16 @@ export DEBIAN_FRONTEND=noninteractive
 ```
 
 > Non-root runs require passwordless sudo and helpers that use sudo for writes under `/etc/postgresql/...`.
+> **Important — CLI behavior:** `pgprovision` prints usage and exits if called with **no arguments**. Environment variables alone do **not** trigger execution. Include at least one flag in every call. This guide uses **CLI flags that mirror the shell defaults** (e.g., `--pg-version 16`) so behavior matches `provision.sh` with no args.
+
+**CLI ⇄ Env quick map**
+- `--socket-only` ⇄ `SOCKET_ONLY=true`
+- `--allow-network` ⇄ `ALLOW_NETWORK=true`
+- `--allowed-cidr` / `--allowed-cidr-v6` ⇄ `ALLOWED_CIDR` / `ALLOWED_CIDR_V6`
+- `--profile NAME` ⇄ `PROFILE=NAME`
+- `--enable-tls` ⇄ `ENABLE_TLS=true`
+- `--data-dir PATH|auto` ⇄ `DATA_DIR=...`
+- `--create-user/--create-db/--create-password` ⇄ `CREATE_USER/CREATE_DB/CREATE_PASSWORD` (prefer `CREATE_PASSWORD_FILE` for secrets)
 
 ______________________________________________________________________
 
@@ -35,14 +45,16 @@ pgprovision --dry-run | tee ./pgprov_dryrun.log
 ! grep -qE '(^|[[:space:]])apt(-get)?[[:space:]]+install([[:space:]]|$)' ./pgprov_dryrun.log
 ```
 
-**Expect:** clear note that provisioning is for Ubuntu and **no** `apt install` lines executed.
+**Expect:** note that provisioning is for Ubuntu and **no** `apt install` lines executed.
 
 ______________________________________________________________________
 
 ## 2) Full install (PGDG repo, packages, cluster, service)
 
+Use an explicit default flag to trigger execution without changing behavior:
+
 ```bash
-pgprovision | tee ./pgprov_install.log
+pgprovision --pg-version 16 | tee ./pgprov_install.log
 
 systemctl status postgresql@16-main --no-pager || true
 psql --version
@@ -73,16 +85,18 @@ awk '/^# pgprovision:hba begin \(managed\)/,/^# pgprovision:hba end/' "$HBA"
 ### 3.2 Socket‑only posture
 
 ```bash
-SOCKET_ONLY=true pgprovision
+pgprovision --socket-only
 awk '/^# pgprovision:hba begin \(managed\)/,/^# pgprovision:hba end/' "$HBA" | grep -A2 'socket-only'
 ```
 
 ### 3.3 Allow networks
 
 ```bash
-ALLOW_NETWORK=true ALLOWED_CIDR="10.0.0.0/8, 192.168.1.0/24" pgprovision
+pgprovision --allow-network --allowed-cidr "10.0.0.0/8, 192.168.1.0/24"
 awk '/^# pgprovision:hba begin \(managed\)/,/^# pgprovision:hba end/' "$HBA" | grep -E '10\.0\.0\.0/8|192\.168\.1\.0/24'
 ```
+
+> Server still binds `listen_addresses=localhost` by default; this section validates HBA only.
 
 ______________________________________________________________________
 
@@ -102,7 +116,7 @@ default_statistics_target=250
 track_io_timing=on
 EOF
 
-PROFILE=xl-32c-256g pgprovision
+pgprovision --profile xl-32c-256g
 DROPIN=/etc/postgresql/16/main/conf.d/99-pgprovision.conf
 grep -E 'shared_buffers|max_wal_size|track_io_timing' "$DROPIN"
 ```
@@ -117,6 +131,9 @@ pgprovision --create-user devuser --create-password 'pAs$123' --create-db devdb
 sudo -u postgres psql -At -c "SELECT rolname, rolcanlogin FROM pg_roles WHERE rolname='devuser';"
 sudo -u postgres psql -At -c "SELECT datname, pg_get_userbyid(datdba) FROM pg_database WHERE datname='devdb';"
 ```
+
+> For non-interactive secrets:  
+> `CREATE_PASSWORD_FILE=/run/secrets/pgpass pgprovision --create-user dev --create-db dev`
 
 ______________________________________________________________________
 
@@ -141,7 +158,7 @@ ______________________________________________________________________
 
 ```bash
 set +e
-ENABLE_TLS=true pgprovision
+pgprovision --enable-tls
 echo "RC=$?"
 set -e
 ```
@@ -155,7 +172,7 @@ openssl req -x509 -newkey rsa:2048 -nodes -keyout "$DATA_DIR/server.key" -out "$
 chown postgres:postgres "$DATA_DIR/server.crt" "$DATA_DIR/server.key"
 chmod 0600 "$DATA_DIR/server.key"
 
-ENABLE_TLS=true pgprovision
+pgprovision --enable-tls
 sudo -u postgres psql -At -c "SHOW ssl;"
 sudo -u postgres psql -At -c "SHOW ssl_min_protocol_version;"
 ```
@@ -200,9 +217,9 @@ ______________________________________________________________________
 
   ```bash
   sudo rm -f /tmp/pgprov_install.log
-  pgprovision | tee ./pgprov_install.log
+  pgprovision --pg-version 16 | tee ./pgprov_install.log
   # or:
-  pgprovision | sudo tee /tmp/pgprov_install.log >/dev/null
+  pgprovision --pg-version 16 | sudo tee /tmp/pgprov_install.log >/dev/null
   ```
 
 - **Service didn’t start**:
@@ -214,6 +231,8 @@ ______________________________________________________________________
   sudo pg_createcluster 16 main || true
   sudo pg_ctlcluster 16 main start || true
   ```
+
+- **PGDG key error** (`NO_PUBKEY …ACCC4CF8`): ensure `/etc/apt/keyrings/postgresql.gpg` exists and is world‑readable (`chmod 0644`). Re-run `apt-get update`.
 
 - **Permission denied writing `/etc/postgresql/...`**: run as root or ensure helpers use sudo for writes.
 

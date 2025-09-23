@@ -1,10 +1,10 @@
 [build-system]
-requires = ["setuptools>=68,<77", "wheel"]
+requires = ["setuptools>=68,<77", "wheel", "setuptools-scm>=8"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "pg-provision"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Idempotent PostgreSQL provisioning as a Python package (wrapping portable shell scripts)"
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.9"
@@ -53,3 +53,6 @@ where = ["src"]
 [tool.pytest.ini_options]
 addopts = "-ra"
 testpaths = ["tests"]
+
+[tool.setuptools_scm]
+tag_regex = "^(?:v)?(?P<version>.*)$"

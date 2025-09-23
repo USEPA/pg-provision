@@ -1,4 +1,3 @@
-import builtins
 import os
 from types import SimpleNamespace
 
@@ -55,4 +54,3 @@ def test_cli_uses_sudo_for_actions(monkeypatch):
     rc = cli._run_script("provision.sh", ["--repo", "pgdg"])  # type: ignore[arg-type]
     assert rc == 0
     assert calls["cmd"][0] == "sudo"
-
