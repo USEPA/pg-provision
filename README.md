@@ -1,5 +1,7 @@
 # pg-provision
 
+[![PyPI - Version](https://img.shields.io/pypi/v/pg-provision.svg)](https://pypi.org/project/pg-provision/) [![Python Versions](https://img.shields.io/pypi/pyversions/pg-provision.svg)](https://pypi.org/project/pg-provision/)
+
 Idempotent PostgreSQL provisioning as a Python package wrapping portable shell scripts.
 
 ## Install
@@ -40,3 +42,8 @@ CREATE_PASSWORD_FILE=/run/secrets/pgpass \
 pgprovision --create-user app --create-db app
 ```
 This prevents secrets from appearing in argv or logs.
+
+## Project Links
+
+- PyPI: https://pypi.org/project/pg-provision/
+- Release 0.1.0: https://pypi.org/project/pg-provision/0.1.0/

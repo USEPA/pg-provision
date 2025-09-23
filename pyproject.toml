@@ -32,6 +32,7 @@ pgprovision = "pgprovision.cli:main"
 Homepage = "https://github.com/scr1ptcat/pg-provision"
 Repository = "https://github.com/scr1ptcat/pg-provision"
 Issues = "https://github.com/scr1ptcat/pg-provision/issues"
+PyPI = "https://pypi.org/project/pg-provision/"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
