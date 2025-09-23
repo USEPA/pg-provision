@@ -27,7 +27,9 @@ def _run_script(script_rel: str, passthrough_args):
 def main(argv=None):
     # Passthrough CLI: we only parse a couple of meta-flags; everything else goes to the shell script.
     parser = argparse.ArgumentParser(
-        prog="pgprovision", add_help=False, description="PostgreSQL idempotent provisioner"
+        prog="pgprovision",
+        add_help=False,
+        description="PostgreSQL idempotent provisioner",
     )
     # We don't duplicate the shell flags; we just forward them verbatim.
     parser.add_argument(

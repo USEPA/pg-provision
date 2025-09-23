@@ -6,7 +6,6 @@ psql is invoked with -f <tempfile>, and that the SQL file contains the
 password (not the argv). Also verifies support for CREATE_PASSWORD_FILE.
 """
 
-import os
 import re
 
 import pytest
@@ -63,4 +62,3 @@ def test_create_user_password_from_file(tmp_path, bash):
     # Ensure file execution is used and password not exposed via argv
     assert "Pa$$wd" not in line
     assert "-f" in line
-
