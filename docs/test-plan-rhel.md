@@ -26,6 +26,7 @@ set -euxo pipefail
 > **Important — CLI behavior:** `pgprovision` prints usage and exits if called with **no arguments**. Environment variables alone do **not** trigger execution. Include at least one flag. This guide uses **CLI flags that mirror defaults** (e.g., `--pg-version 16`) to match `provision.sh` with no args.
 
 **CLI ⇄ Env quick map**
+
 - `--socket-only` ⇄ `SOCKET_ONLY=true`
 - `--allow-network` ⇄ `ALLOW_NETWORK=true`
 - `--allowed-cidr` / `--allowed-cidr-v6` ⇄ `ALLOWED_CIDR` / `ALLOWED_CIDR_V6`

@@ -9,11 +9,12 @@ ______________________________________________________________________
 - Ubuntu VM with internet access.
 - Willingness to install PostgreSQL 16 (PGDG).
 - Install the package (system or venv):
-  ```bash
+
+```bash
   pip install pg-provision
   # sanity
   pgprovision --help
-  ```
+ ```
 
 **Recommended shell setup**
 
@@ -27,6 +28,7 @@ export DEBIAN_FRONTEND=noninteractive
 > **Important — CLI behavior:** `pgprovision` prints usage and exits if called with **no arguments**. Environment variables alone do **not** trigger execution. Include at least one flag in every call. This guide uses **CLI flags that mirror the shell defaults** (e.g., `--pg-version 16`) so behavior matches `provision.sh` with no args.
 
 **CLI ⇄ Env quick map**
+
 - `--socket-only` ⇄ `SOCKET_ONLY=true`
 - `--allow-network` ⇄ `ALLOW_NETWORK=true`
 - `--allowed-cidr` / `--allowed-cidr-v6` ⇄ `ALLOWED_CIDR` / `ALLOWED_CIDR_V6`
@@ -132,7 +134,7 @@ sudo -u postgres psql -At -c "SELECT rolname, rolcanlogin FROM pg_roles WHERE ro
 sudo -u postgres psql -At -c "SELECT datname, pg_get_userbyid(datdba) FROM pg_database WHERE datname='devdb';"
 ```
 
-> For non-interactive secrets:  
+> For non-interactive secrets:\
 > `CREATE_PASSWORD_FILE=/run/secrets/pgpass pgprovision --create-user dev --create-db dev`
 
 ______________________________________________________________________
@@ -246,4 +248,73 @@ rm -f /etc/apt/sources.list.d/pgdg.list /etc/apt/keyrings/postgresql.gpg
 apt-get autoremove -y
 rm -rf /var/lib/postgresql /etc/postgresql /var/log/postgresql
 groupdel pgclients || true
+```
+______________________________________________________________________
+## Provisioning Idempotency Testing (Ubuntu)
+*Proves we can re-run provisioning without breaking anything (idempotent, no drift).*
+
+# Run as root or with sudo.
+
+```bash
+set -euxo pipefail
+trap 'echo "--- $UNIT (tail) ---"; journalctl -u "$UNIT" --no-pager | tail -n 80 || true' ERR
+
+PGV=16
+CL=main
+UNIT="postgresql@${PGV}-${CL}"
+HBA="/etc/postgresql/${PGV}/${CL}/pg_hba.conf"
+DROPIN="/etc/postgresql/${PGV}/${CL}/conf.d/99-pgprovision.conf"
+PGDG_LIST="/etc/apt/sources.list.d/pgdg.list"
+KEYRING="/etc/apt/keyrings/postgresql.gpg"
+NEW_DATA="/var/lib/postgresql/${PGV}/custom-data"
+
+# Capture identity to detect accidental reinit
+sysid_before=$(sudo -u postgres psql -At -c "SELECT system_identifier FROM pg_control_system();")
+
+# 1) Base install should be stable (idempotent)
+sudo pgprovision --pg-version "${PGV}"
+
+# 2) HBA posture: socket-only -> allow network -> back to socket-only
+sudo pgprovision --socket-only
+awk '/^# pgprovision:hba begin \(managed\)/,/^# pgprovision:hba end/' "$HBA" | grep -F 'socket-only'
+
+sudo pgprovision --allow-network --allowed-cidr "127.0.0.1/32"
+awk '/^# pgprovision:hba begin \(managed\)/,/^# pgprovision:hba end/' "$HBA" | grep -F '127.0.0.1/32'
+
+sudo pgprovision --socket-only
+# Ensure exactly one managed block (no dupes)
+test "$(grep -Fc "# pgprovision:hba begin (managed)" "$HBA")" -eq 1
+
+# 3) Profile apply should be idempotent
+sudo pgprovision --profile xl-32c-256g
+grep -E 'shared_buffers|track_io_timing' "$DROPIN"
+sha1_before=$(sha1sum "$DROPIN" | awk '{print $1}')
+sudo pgprovision --profile xl-32c-256g
+sha1_after=$(sha1sum "$DROPIN" | awk '{print $1}')
+test "$sha1_before" = "$sha1_after"
+
+# 4) TLS guardrail: expect non-zero RC without cert/key, but keep the service alive
+set +e
+sudo pgprovision --enable-tls
+rc=$?
+set -e
+echo "enable-tls RC=$rc (expected non-zero without cert/key)"
+systemctl is-active --quiet "$UNIT" || sudo systemctl restart "$UNIT"
+sudo -u postgres psql -At -c "SELECT 1;"
+
+# 5) Data directory relocation (idempotent when path is unchanged)
+sudo pgprovision --data-dir "$NEW_DATA"
+sudo -u postgres psql -At -c "SHOW data_directory;" | grep -Fx "$NEW_DATA"
+
+# 6) Invariants
+test -r "$KEYRING"
+grep -Fq "https://apt.postgresql.org" "$PGDG_LIST"
+awk '/^# pgprovision:hba begin \(managed\)/,/^# pgprovision:hba end/' "$HBA" >/dev/null
+sudo -u postgres psql -At -c "SHOW listen_addresses;" | grep -Fx 'localhost'
+# If you *intend* to preload pg_stat_statements, assert it. Otherwise leave this commented.
+# sudo -u postgres psql -At -c "SHOW shared_preload_libraries;" | grep -Fq pg_stat_statements
+
+# 7) Cluster identity unchanged ⇒ no reinit
+sysid_after=$(sudo -u postgres psql -At -c "SELECT system_identifier FROM pg_control_system();")
+test "$sysid_before" = "$sysid_after"
 ```
