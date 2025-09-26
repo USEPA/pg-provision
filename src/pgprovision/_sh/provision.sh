@@ -297,53 +297,83 @@ assert_psql_major_matches() {
 }
 
 apply_dropin_config() {
-	# Strict: fail if we cannot write conf.d or the drop-in
-	local conf_file="$1" data_dir="$2" dropin_dir dropin
+	local conf_file="$1" data_dir="$2" dropin_dir dropin tmp
 	dropin_dir="$(dirname -- "$conf_file")/conf.d"
 	dropin="${dropin_dir}/99-pgprovision.conf"
 
 	ensure_conf_dir_like_conf "$conf_file"
 	ensure_line "$conf_file" "include_dir = 'conf.d'"
 
-	write_key_value_dropin "$dropin" port "$PORT"
-	write_key_value_dropin "$dropin" listen_addresses "'${LISTEN_ADDRESSES}'"
-	write_key_value_dropin "$dropin" password_encryption "scram-sha-256"
-	write_key_value_dropin "$dropin" shared_preload_libraries "'pg_stat_statements'"
-	write_key_value_dropin "$dropin" logging_collector on
-	write_key_value_dropin "$dropin" log_min_duration_statement "250ms"
-	write_key_value_dropin "$dropin" log_connections on
-	write_key_value_dropin "$dropin" log_disconnections on
-	write_key_value_dropin "$dropin" log_line_prefix "'%m [%p] user=%u db=%d app=%a client=%h '"
+	# Build the content in a subshell so EXIT trap is scoped to this block
+	local staging="${dropin}.new.$$"
+	(
+		set -Eeuo pipefail
+		tmp="$(mktemp)"
+		trap 'rm -f "${tmp:-}"' EXIT
+		# Safe escaper for quoted PostgreSQL string literals (doubles single quotes)
+		pg_escape() {
+			local s=${1-} q="'"
+			s=${s//"$q"/"$q$q"}
+			printf '%s' "$s"
+		}
+		{
+			# Baseline settings
+			printf 'port = %s\n' "$PORT"
+			printf "listen_addresses = '%s'\n" "$(pg_escape "$LISTEN_ADDRESSES")"
+			printf 'password_encryption = %s\n' 'scram-sha-256'
+			printf "shared_preload_libraries = '%s'\n" 'pg_stat_statements'
+			printf 'logging_collector = %s\n' 'on'
+			printf 'log_min_duration_statement = %s\n' '250ms'
+			printf 'log_connections = %s\n' 'on'
+			printf 'log_disconnections = %s\n' 'on'
+			printf "log_line_prefix = '%s'\n" "$(pg_escape '%m [%p] user=%u db=%d app=%a client=%h ')"
 
-	# Socket gating
-	write_key_value_dropin "$dropin" unix_socket_group "'${UNIX_SOCKET_GROUP}'"
-	write_key_value_dropin "$dropin" unix_socket_permissions "${UNIX_SOCKET_PERMISSIONS}"
-	if [[ -n "${UNIX_SOCKET_DIR}" ]]; then
-		write_key_value_dropin "$dropin" unix_socket_directories "'${UNIX_SOCKET_DIR}'"
+			# Socket gating
+			printf "unix_socket_group = '%s'\n" "$(pg_escape "$UNIX_SOCKET_GROUP")"
+			printf 'unix_socket_permissions = %s\n' "$UNIX_SOCKET_PERMISSIONS"
+			if [[ -n "${UNIX_SOCKET_DIR}" ]]; then
+				printf "unix_socket_directories = '%s'\n" "$(pg_escape "$UNIX_SOCKET_DIR")"
+			fi
+
+			# TLS semantics (note: value with dot must be quoted)
+			if [[ "$ENABLE_TLS" == "true" ]]; then
+				printf 'ssl = %s\n' 'on'
+				printf "ssl_min_protocol_version = '%s'\n" "$(pg_escape 'TLSv1.2')"
+				printf 'ssl_prefer_server_ciphers = %s\n' 'on'
+			else
+				printf 'ssl = %s\n' 'off'
+			fi
+
+			# Optional profile overrides
+			if [[ "$(declare -p PROFILE_OVERRIDES 2>/dev/null || true)" == declare\ -a* ]] &&
+				((${#PROFILE_OVERRIDES[@]} > 0)); then
+				local kv k v
+				for kv in "${PROFILE_OVERRIDES[@]}"; do
+					k="${kv%%=*}"
+					v="${kv#*=}"
+					[[ "$k" =~ ^[[:alnum:]_.]+$ ]] || {
+						warn "skip invalid key: $k"
+						continue
+					}
+					[[ "$v" != *$'\n'* ]] || {
+						warn "skip newline in value for $k"
+						continue
+					}
+					printf '%s = %s\n' "$k" "$v"
+				done
+			fi
+		} >"$tmp"
+
+		# Stage inside target directory; final mv is atomic on same FS
+		must_run "stage drop-in $staging" "${SUDO[@]}" cp -f -- "$tmp" "$staging"
+		must_run "align owner to $conf_file" "${SUDO[@]}" chown --reference "$conf_file" "$staging"
+		must_run "set secure permissions" "${SUDO[@]}" chmod 0600 "$staging"
+	)
+	must_run "activate drop-in $dropin" "${SUDO[@]}" mv -f -- "$staging" "$dropin"
+	# Restore SELinux context if available (no-op elsewhere)
+	if command -v restorecon >/dev/null 2>&1; then
+		soft_run "restorecon context for $dropin" restorecon -q "$dropin"
 	fi
-
-	if [[ ${#PROFILE_OVERRIDES[@]} -gt 0 ]]; then
-		for kv in "${PROFILE_OVERRIDES[@]}"; do
-			local k="${kv%%=*}" v="${kv#*=}"
-			write_key_value_dropin "$dropin" "$k" "$v"
-		done
-	fi
-
-	if [[ "$ENABLE_TLS" == "true" ]]; then
-		write_key_value_dropin "$dropin" ssl on
-		write_key_value_dropin "$dropin" ssl_min_protocol_version "TLSv1.2"
-		write_key_value_dropin "$dropin" ssl_prefer_server_ciphers on
-	else
-		# Ensure we don’t carry a stale TLS-on from a previous run
-		write_key_value_dropin "$dropin" ssl off
-		# Optional: remove TLS-only keys so default server settings apply cleanly
-		_as_root sed -i -E '/^[[:space:]]*ssl_min_protocol_version[[:space:]]*=/d' "$dropin"
-		_as_root sed -i -E '/^[[:space:]]*ssl_prefer_server_ciphers[[:space:]]*=/d' "$dropin"
-	fi
-
-	# Tighten permissions on drop-in to match/confine to base conf owner and 0600 mode
-	must_run "align owner of $dropin to $conf_file" "${SUDO[@]}" chown --reference "$conf_file" "$dropin"
-	must_run "set secure permissions on $dropin" "${SUDO[@]}" chmod 0600 "$dropin"
 }
 
 replace_managed_block_top() {

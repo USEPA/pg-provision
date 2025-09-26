@@ -44,7 +44,7 @@ def test_tls_dropin_writes_ssl_options(tmp_path, bash):
     into conf.d drop-ins. Do not couple to a specific filename; aggregate content
     from all *.conf files.
       - ssl = on
-      - ssl_min_protocol_version = TLSv1.2
+      - ssl_min_protocol_version = 'TLSv1.2'
       - ssl_prefer_server_ciphers = on
     """
     conf = tmp_path / "postgresql.conf"
@@ -70,10 +70,14 @@ def test_tls_dropin_writes_ssl_options(tmp_path, bash):
     content = "\n".join(f.read_text(encoding="utf-8") for f in files)
 
     assert len(re.findall(r"^\s*ssl\s*=\s*on\s*$", content, re.M)) == 1
+    # Quick exact check and regex for robustness
+    assert "ssl_min_protocol_version = 'TLSv1.2'" in content
     assert (
         len(
             re.findall(
-                r"^\s*ssl_min_protocol_version\s*=\s*TLSv1\.2\s*$", content, re.M
+                r"^\s*ssl_min_protocol_version\s*=\s*'TLSv1\.2'\s*$",
+                content,
+                re.M,
             )
         )
         == 1
@@ -104,7 +108,7 @@ def test_tls_disabled_has_no_ssl_options(tmp_path, bash):
 
     assert not re.search(r"^\s*ssl\s*=\s*on\s*$", content, re.M)
     assert not re.search(
-        r"^\s*ssl_min_protocol_version\s*=\s*TLSv1\.2\s*$", content, re.M
+        r"^\s*ssl_min_protocol_version\s*=\s*'TLSv1\.2'\s*$", content, re.M
     )
     assert not re.search(r"^\s*ssl_prefer_server_ciphers\s*=\s*on\s*$", content, re.M)
 
@@ -275,3 +279,32 @@ def test_parse_args_flags_and_unknown(tmp_path, bash):
 
     r2 = bash("parse_args --unknown-flag")
     assert r2.rc != 0
+
+
+@pytest.mark.unit
+def test_apply_dropin_escapes_single_quotes_in_strings(tmp_path, bash):
+    """
+    apply_dropin_config must safely escape single quotes in quoted string values
+    (PostgreSQL style: double single-quotes inside literals).
+    We exercise listen_addresses and ensure the drop-in contains a doubled quote.
+    """
+    conf = tmp_path / "postgresql.conf"
+    conf.touch()
+
+    env = {
+        "CONF": str(conf),
+        "DATA": str(tmp_path),
+        "LISTEN_ADDRESSES": "lo'calhost",
+    }
+    r1 = bash('apply_dropin_config "$CONF" "$DATA"', env=env)
+    assert r1.rc == 0, r1.stderr
+    r2 = bash('apply_dropin_config "$CONF" "$DATA"', env=env)
+    assert r2.rc == 0, r2.stderr
+
+    dropin_dir = tmp_path / "conf.d"
+    files = list(dropin_dir.glob("*.conf"))
+    assert files, "No drop-in written to conf.d"
+    content = "\n".join(f.read_text(encoding="utf-8") for f in files)
+
+    # Expect listen_addresses = 'lo''calhost'
+    assert re.search(r"^\s*listen_addresses\s*=\s*'lo''calhost'\s*$", content, re.M)
