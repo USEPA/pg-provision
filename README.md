@@ -177,4 +177,4 @@ This prevents secrets from appearing in argv or logs.
 ## Project Links
 
 - PyPI: https://pypi.org/project/pg-provision/
-- Release 0.2.1: https://pypi.org/project/pg-provision/0.2.3/
+- Release 0.2.4: https://pypi.org/project/pg-provision/0.2.4/
