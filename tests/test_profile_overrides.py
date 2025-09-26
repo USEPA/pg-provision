@@ -35,9 +35,7 @@ def test_profile_overrides_idempotent_singleton(tmp_path, bash):
 
     content = _read_dropins_text(tmp_path)
     assert len(re.findall(r"^\s*work_mem\s*=\s*64MB\s*$", content, re.M)) == 1
-    assert (
-        len(re.findall(r"^\s*shared_buffers\s*=\s*128MB\s*$", content, re.M)) == 1
-    )
+    assert len(re.findall(r"^\s*shared_buffers\s*=\s*128MB\s*$", content, re.M)) == 1
 
 
 @pytest.mark.unit
@@ -85,4 +83,3 @@ def test_load_profile_overrides_integration_and_dropin(tmp_path, bash):
     # Check a couple of representative keys from the built-in profile
     assert len(re.findall(r"^\s*work_mem\s*=\s*32MB\s*$", content, re.M)) == 1
     assert len(re.findall(r"^\s*shared_buffers\s*=\s*64GB\s*$", content, re.M)) == 1
-
