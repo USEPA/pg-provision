@@ -53,6 +53,90 @@ _rhel_selinux_label_datadir() {
 	run "${SUDO[@]}" restorecon -Rv "${dir}"
 }
 
+_is_valid_pgdata() {
+	local d="${1:?}"
+	[[ -d "$d" && -f "$d/PG_VERSION" && -f "$d/global/pg_control" ]]
+}
+
+_rhel_current_pgdata() {
+	local svc override pgdata
+	svc="$(_rhel_service_name)"
+	pgdata="$(_rhel_default_pgdata_for_service)"
+	override="/etc/systemd/system/${svc}.service.d/override.conf"
+	if [[ -r "$override" ]] && grep -q '^Environment=PGDATA=' "$override"; then
+		pgdata=$(sed -n 's/^Environment=PGDATA=\(.*\)$/\1/p' "$override" | tail -n1)
+	fi
+	printf '%s\n' "$pgdata"
+}
+
+_rhel_self_heal_cluster() {
+	local svc cur def reason=() broken="false"
+	svc="$(_rhel_service_name)"
+	cur="$(_rhel_current_pgdata)"
+	def="$(_rhel_default_pgdata_for_service)"
+
+	if [[ ! -d "$cur" ]]; then
+		broken="true"
+		reason+=("PGDATA missing: $cur")
+	fi
+	if [[ -d "$cur" ]] && ! _is_valid_pgdata "$cur"; then
+		broken="true"
+		reason+=("invalid PGDATA: $cur")
+	fi
+	if [[ "$cur" == "$def" && ! -d "$def" ]]; then
+		broken="true"
+		reason+=("no default cluster at $def")
+	fi
+
+	[[ "$broken" != "true" ]] && return 0
+	warn "RHEL self-heal: detected broken cluster (${reason[*]})"
+
+	soft_run "stop $svc" "${SUDO[@]}" systemctl stop "$svc"
+
+	local target=""
+	if [[ -d "$cur" ]] && _is_valid_pgdata "$cur"; then
+		target="$cur"
+	elif [[ -d "$def" ]] && _is_valid_pgdata "$def"; then
+		target="$def"
+	fi
+
+	if [[ -n "$target" ]]; then
+		must_run "ownership $target" "${SUDO[@]}" chown -R postgres:postgres -- "$target"
+		must_run "chmod 0700 $target" "${SUDO[@]}" chmod 0700 -- "$target"
+		_rhel_selinux_label_datadir "$target" || warn "SELinux label failed for $target"
+		_rhel_set_pgdata_override "$svc" "$target"
+		must_run "enable+start $svc" "${SUDO[@]}" systemctl enable --now "$svc"
+		log "RHEL self-heal: adopted existing PGDATA at $target"
+		return 0
+	fi
+
+	local pm_init_done="false"
+	if command -v postgresql-setup >/dev/null 2>&1 && [[ "$svc" == "postgresql" ]]; then
+		soft_run "postgresql-setup --initdb" "${SUDO[@]}" postgresql-setup --initdb && pm_init_done="true"
+	elif [[ -x "/usr/pgsql-${PG_VERSION}/bin/postgresql-${PG_VERSION}-setup" ]]; then
+		soft_run "pgdg setup initdb" "${SUDO[@]}" "/usr/pgsql-${PG_VERSION}/bin/postgresql-${PG_VERSION}-setup" initdb && pm_init_done="true"
+	fi
+
+	local target_new
+	if [[ "${DATA_DIR:-auto}" != "auto" && -n "${DATA_DIR}" ]]; then
+		target_new="${DATA_DIR}"
+	else
+		target_new="$def"
+	fi
+
+	if [[ "$pm_init_done" != "true" || "${DATA_DIR:-auto}" != "auto" ]]; then
+		must_run "create $target_new" "${SUDO[@]}" install -d -m 0700 -- "$target_new"
+		must_run "chown $target_new" "${SUDO[@]}" chown -R postgres:postgres -- "$target_new"
+		_rhel_selinux_label_datadir "$target_new" || warn "SELinux label failed for $target_new"
+		if [[ ! -d "${target_new}/base" ]]; then
+			must_run "initdb $target_new" "${SUDO[@]}" -u postgres initdb -D "$target_new"
+		fi
+	fi
+
+	_rhel_set_pgdata_override "$svc" "$target_new"
+	must_run "enable+start $svc" "${SUDO[@]}" systemctl enable --now "$svc"
+	log "RHEL self-heal: created cluster at $target_new"
+}
 os_prepare_repos() {
 	local repo_kind="${1:-${REPO_KIND}}"
 	local pm
@@ -98,6 +182,21 @@ os_init_cluster() {
 	local data_dir="${1:-auto}"
 	local svc
 	svc="$(_rhel_service_name)"
+
+	# Self-heal before any init logic
+	if [[ "${SELF_HEAL:-true}" == "true" ]]; then
+		_rhel_self_heal_cluster || true
+	fi
+
+	# If default path is valid and auto mode, ensure service and return
+	if [[ "$data_dir" == "auto" ]]; then
+		local cur
+		cur="$(_rhel_current_pgdata)"
+		if [[ -n "$cur" ]] && _is_valid_pgdata "$cur"; then
+			must_run "enable+start $svc" "${SUDO[@]}" systemctl enable --now "$svc"
+			return 0
+		fi
+	fi
 	# Choose setup command depending on packaging
 	local -a setup_cmd=()
 	if command -v postgresql-setup >/dev/null 2>&1 && [[ "$svc" == "postgresql" ]]; then

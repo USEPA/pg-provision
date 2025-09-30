@@ -51,10 +51,10 @@ repos:
       - id: shfmt
 
   # Shell linting
-  - repo: https://github.com/koalaman/shellcheck-precommit
-    rev: v0.11.0
-    hooks:
-    -   id: shellcheck
+  -   repo: https://github.com/shellcheck-py/shellcheck-py
+      rev: v0.11.0.1
+      hooks:
+      -   id: shellcheck
 
   # Secrets scanning (kept to commit stage; uses repo baseline)
   - repo: https://github.com/Yelp/detect-secrets

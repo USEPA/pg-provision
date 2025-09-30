@@ -130,6 +130,7 @@ PROFILE=${PROFILE:-}
 ENV_FILE=${ENV_FILE:-}
 DRY_RUN=${DRY_RUN:-false}
 INIT_PG_STAT_STATEMENTS=${INIT_PG_STAT_STATEMENTS:-false}
+SELF_HEAL=${SELF_HEAL:-true}
 
 # Local hardening flags
 SOCKET_ONLY=${SOCKET_ONLY:-}
@@ -148,6 +149,7 @@ Postgres Provisioner (PG16)
 Usage: $0 \
   [--repo pgdg|os] [--port N] [--listen-addresses VAL] [--allowed-cidr CIDR] [--allowed-cidr-v6 CIDR6] \\
   [--data-dir PATH|auto] [--enable-tls] [--init-pg-stat-statements] \\
+  [--no-self-heal] \\
   [--create-db NAME] [--create-user NAME] [--create-password SECRET] [--allow-network] [--profile NAME] [--env-file FILE] [--dry-run] \\
   [--socket-only] [--unix-socket-group NAME] [--unix-socket-permissions MODE] [--unix-socket-dir PATH] \\
   [--local-peer-map NAME] [--local-map-entry OSUSER:DBROLE]... [--admin-group-role NAME] [--admin-dbrole NAME] [--disable-postgres-login]
@@ -194,6 +196,10 @@ parse_args() {
 			;;
 		--init-pg-stat-statements)
 			INIT_PG_STAT_STATEMENTS=true
+			shift 1
+			;;
+		--no-self-heal)
+			SELF_HEAL=false
 			shift 1
 			;;
 		--create-db)

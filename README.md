@@ -158,6 +158,22 @@ ______________________________________________________________________
 - Ubuntu: [docs/test-plan-ubuntu.md](docs/test-plan-ubuntu.md)
 - RHEL/Rocky/Alma: [docs/test-plan-rhel.md](docs/test-plan-rhel.md)
 
+### Self‑Heal on Ubuntu (PGDG)
+
+On Ubuntu/Debian with PGDG, packaging normally creates a default `main` cluster. If that metadata is broken (e.g., `pg_lsclusters` errors, `/etc/postgresql/<ver>/main` owned by root, or `data_directory` missing), pg‑provision can self‑heal before applying HBA/profile/role changes.
+
+- Non‑destructive: it never deletes a directory that looks like a real PGDATA (has `PG_VERSION` and `global/pg_control`).
+- If a valid PGDATA exists, it rebuilds Debian metadata to point at it (adoption), then starts the service.
+- Default behavior is on; disable with `--no-self-heal` or `SELF_HEAL=false`.
+- See `docs/test-plan-ubuntu.md` for self‑heal scenarios.
+
+### Self‑Heal on RHEL (PGDG)
+
+On RHEL family (RHEL/Rocky/Alma/Fedora/Amazon Linux), the provisioner preflights the cluster and will adopt an existing valid `PGDATA` by setting a systemd override (`Environment=PGDATA=…`) and ensuring permissions/SELinux context. If no valid data exists, it initializes a fresh cluster using packaging helpers (`postgresql-setup`) or `initdb`.
+
+- Non‑destructive: never deletes a directory that looks like a real PGDATA.
+- See `docs/test-plan-rhel.md` for self‑heal scenarios.
+
 ## Notes
 
 - Linux-only. Commands that modify the system require root or passwordless sudo.

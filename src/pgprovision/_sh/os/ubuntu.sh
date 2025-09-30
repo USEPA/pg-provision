@@ -65,14 +65,123 @@ os_install_packages() {
 	run "${SUDO[@]}" apt-get install -y "postgresql-${PG_VERSION}" "postgresql-client-${PG_VERSION}" postgresql-contrib
 }
 
+_is_valid_pgdata() {
+	local d="${1:?}"
+	[[ -d "$d" && -f "$d/PG_VERSION" && -f "$d/global/pg_control" ]]
+}
+
+_current_cluster_datadir() {
+	local d=""
+	if command -v pg_lsclusters >/dev/null 2>&1; then
+		d=$(pg_lsclusters --no-header 2>/dev/null | awk '$1=="'"${PG_VERSION}"'" && $2=="main"{print $6; exit}')
+	fi
+	if [[ -z "$d" && -r "/etc/postgresql/${PG_VERSION}/main/postgresql.conf" ]]; then
+		d=$(awk -F= '/^[[:space:]]*data_directory[[:space:]]*=/ { v=$2; gsub(/^[[:space:]]+|[[:space:]]+$/, "", v); gsub(/^'\''|'\''$/, "", v); gsub(/^"|"$/, "", v); print v; exit }' \
+			"/etc/postgresql/${PG_VERSION}/main/postgresql.conf" 2>/dev/null || true)
+	fi
+	printf '%s\n' "$d"
+}
+
+# Ubuntu self-heal preflight: detect and repair broken default cluster safely.
+# Non-destructive: never delete a directory that looks like valid PGDATA.
+_ubuntu_self_heal_cluster() {
+	local conf="/etc/postgresql/${PG_VERSION}/main/postgresql.conf"
+	local datadir reason=() broken="false"
+	datadir="$(_current_cluster_datadir)"
+
+	# Detect haunted metadata
+	if ! pg_lsclusters >/dev/null 2>&1; then
+		broken="true"
+		reason+=("pg_lsclusters error")
+	fi
+	# No cluster rows and no metadata dir → treat as broken (packaging failed to create main)
+	local has_row=""
+	if command -v pg_lsclusters >/dev/null 2>&1; then
+		has_row=$(pg_lsclusters --no-header 2>/dev/null | awk '$1=="'"${PG_VERSION}"'" && $2=="main"{print "yes"; exit}')
+	fi
+	if [[ -z "$has_row" && ! -e "/etc/postgresql/${PG_VERSION}/main" ]]; then
+		broken="true"
+		reason+=("no ${PG_VERSION}/main cluster")
+	fi
+	if [[ -r "$conf" ]]; then
+		local owner group
+		owner=$(stat -c '%U' -- "$conf" 2>/dev/null || echo "")
+		group=$(stat -c '%G' -- "$conf" 2>/dev/null || echo "")
+		[[ "$owner:$group" != "postgres:postgres" ]] && {
+			broken="true"
+			reason+=("conf owner root")
+		}
+		[[ -n "$datadir" && ! -d "$datadir" ]] && {
+			broken="true"
+			reason+=("missing data_directory")
+		}
+	fi
+	if [[ -n "$datadir" && -d "$datadir" ]]; then
+		if ! _is_valid_pgdata "$datadir"; then
+			broken="true"
+			reason+=("invalid PGDATA layout")
+		fi
+	fi
+	[[ "$broken" != "true" ]] && return 0
+	warn "Ubuntu self-heal: detected broken cluster (${reason[*]})"
+
+	# Stop service safely
+	os_stop "postgresql@${PG_VERSION}-main" || true
+
+	local target real="${datadir:-}"
+	if [[ -n "$real" ]] && _is_valid_pgdata "$real"; then
+		# ADOPT existing valid PGDATA (non-destructive): rebuild metadata only
+		target="$real"
+		# Remove stale metadata if present
+		if [[ -d "/etc/postgresql/${PG_VERSION}/main" ]]; then
+			run "${SUDO[@]}" rm -rf "/etc/postgresql/${PG_VERSION}/main"
+		fi
+		local tmp="/var/lib/postgresql/${PG_VERSION}/tmp-adopt.$$"
+		run "${SUDO[@]}" install -d -m 0700 -- "$tmp"
+		run "${SUDO[@]}" pg_createcluster "${PG_VERSION}" main -d "$tmp"
+		ubuntu_apparmor_allow_datadir "$target" || true
+		local target_lit
+		target_lit=$(printf '%s' "$target" | sed "s/'/''/g")
+		# Use shared helper to replace or append the setting consistently
+		write_key_value_dropin "$conf" data_directory "'${target_lit}'"
+		run "${SUDO[@]}" rm -rf -- "$tmp"
+	else
+		# No valid data: safe to drop stale metadata and recreate fresh
+		run "${SUDO[@]}" pg_dropcluster --stop "${PG_VERSION}" main || true
+		# Ensure metadata is gone
+		if [[ -d "/etc/postgresql/${PG_VERSION}/main" ]]; then
+			run "${SUDO[@]}" rm -rf "/etc/postgresql/${PG_VERSION}/main"
+		fi
+		target="/var/lib/postgresql/${PG_VERSION}/main"
+		if [[ "${DATA_DIR:-auto}" != "auto" && -n "${DATA_DIR}" ]]; then
+			target="${DATA_DIR}"
+		fi
+		run "${SUDO[@]}" install -d -m 0700 -- "$target"
+		ubuntu_apparmor_allow_datadir "$target" || true
+		run "${SUDO[@]}" pg_createcluster "${PG_VERSION}" main -d "$target"
+	fi
+
+	# Ensure config ownership and start
+	if [[ -d "/etc/postgresql/${PG_VERSION}/main" ]]; then
+		run "${SUDO[@]}" chown -R postgres:postgres "/etc/postgresql/${PG_VERSION}/main"
+	fi
+	os_enable_and_start "postgresql@${PG_VERSION}-main"
+	log "Ubuntu self-heal: ensured ${PG_VERSION}/main is healthy (data=${target})"
+}
+
 os_init_cluster() {
 	local data_dir="${1:-auto}"
 	# Ubuntu auto-creates the default cluster when postgresql-${PG_VERSION} is installed via PGDG.
 	# A custom data dir requires cluster tooling.
 
+	# Run Ubuntu self-heal preflight (guarded; full logic planned)
+	if [[ "${SELF_HEAL:-true}" == "true" ]]; then
+		_ubuntu_self_heal_cluster || true
+	fi
+
 	if [[ "$data_dir" != "auto" && -n "$data_dir" ]]; then
 		# Ensure the postgresql-common tools exist if we plan to move/create clusters.
-		if ! command -v pg_dropcluster >/dev/null 2>&1 || ! command -v pg_createcluster >/dev/null 2>&1; then
+		if ! "${SUDO[@]}" bash -lc 'command -v pg_dropcluster >/dev/null 2>&1 && command -v pg_createcluster >/dev/null 2>&1'; then
 			err "pg_dropcluster/pg_createcluster not available; cannot relocate data dir to ${data_dir}"
 			exit 2
 		fi
@@ -86,15 +195,13 @@ os_init_cluster() {
 		# --- Early return: already at desired data_dir
 		if [[ -n "$cur" && "$cur" == "$data_dir" ]]; then
 			# Nothing to relocate; just ensure the service is enabled and running.
-			run "${SUDO[@]}" systemctl enable --now "postgresql@${PG_VERSION}-main"
+			os_enable_and_start "postgresql@${PG_VERSION}-main"
 			return 0
 		fi
 
 		# We need to (re)create the cluster pointing at the requested data_dir.
-		# Stop if active, then drop the existing 'main' (if present).
-		if systemctl is-active --quiet "postgresql@${PG_VERSION}-main"; then
-			run "${SUDO[@]}" systemctl stop "postgresql@${PG_VERSION}-main"
-		fi
+		# Stop service (best-effort; works even if inactive).
+		soft_run "stop service for relocation" os_stop "postgresql@${PG_VERSION}-main"
 		# Drop only if the cluster currently exists; pg_dropcluster errors if not present.
 		if [[ -n "$cur" ]]; then
 			run "${SUDO[@]}" pg_dropcluster --stop "${PG_VERSION}" main
@@ -109,7 +216,7 @@ os_init_cluster() {
 	fi
 
 	# Default path or after relocation: ensure service is enabled & started.
-	run "${SUDO[@]}" systemctl enable --now "postgresql@${PG_VERSION}-main"
+	os_enable_and_start "postgresql@${PG_VERSION}-main"
 }
 
 os_get_paths() {
@@ -142,12 +249,30 @@ os_get_paths() {
 
 os_enable_and_start() {
 	local svc="${1:-postgresql@${PG_VERSION}-main}"
-	run "${SUDO[@]}" systemctl enable --now "$svc"
+	if command -v systemctl >/dev/null 2>&1; then
+		run "${SUDO[@]}" systemctl enable --now "$svc"
+	else
+		# Fallback for environments without systemd (e.g., WSL/containers)
+		run "${SUDO[@]}" pg_ctlcluster "${PG_VERSION}" main start
+	fi
 }
 
 os_restart() {
 	local svc="${1:-postgresql@${PG_VERSION}-main}"
-	run "${SUDO[@]}" systemctl restart "$svc"
+	if command -v systemctl >/dev/null 2>&1; then
+		run "${SUDO[@]}" systemctl restart "$svc"
+	else
+		run "${SUDO[@]}" pg_ctlcluster "${PG_VERSION}" main restart
+	fi
+}
+
+os_stop() {
+	local svc="${1:-postgresql@${PG_VERSION}-main}"
+	if command -v systemctl >/dev/null 2>&1; then
+		run "${SUDO[@]}" systemctl stop "$svc"
+	else
+		run "${SUDO[@]}" pg_ctlcluster "${PG_VERSION}" main stop
+	fi
 }
 
 ubuntu_apparmor_allow_datadir() {
