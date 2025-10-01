@@ -185,23 +185,24 @@ _ubuntu_self_heal_cluster() {
 		group=$(stat -c '%G' -- "$conf" 2>/dev/null || echo "")
 		mode=$(stat -c '%a' -- "$conf" 2>/dev/null || echo "")
 
-		# At least one of: owner==postgres OR group==postgres (with group read)
+		# Diagnostic only: log unusual owner/group, but don't fail on it.
 		if [[ "$owner" != "postgres" && "$group" != "postgres" ]]; then
-			broken="true"
-			reason+=("conf owner/group not postgres ($owner:$group)")
+			warn "conf owner/group not postgres ($owner:$group); relying on readability check"
 		fi
-		_conf_readable_by_postgres "$conf" || {
-			broken="true"
-			reason+=("$(_conf_readable_by_postgres "$conf")")
-		}
-		_conf_readable_by_postgres "$etcdir/pg_hba.conf" || {
-			broken="true"
-			reason+=("pg_hba unreadable")
-		}
-		_conf_readable_by_postgres "$etcdir/pg_ident.conf" || {
-			broken="true"
-			reason+=("pg_ident unreadable")
-		}
+
+		local f
+		local msg
+		local rc
+
+		for f in "$conf" "$etcdir/pg_hba.conf" "$etcdir/pg_ident.conf"; do
+			msg=$(_conf_readable_by_postgres "$f")
+			rc=$?
+			if ((rc != 0)); then
+				broken="true"
+				reason+=("$msg")
+			fi
+		done
+
 	else
 		broken="true"
 		reason+=("missing postgresql.conf")
