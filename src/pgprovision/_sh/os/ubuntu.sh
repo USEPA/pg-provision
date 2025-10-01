@@ -93,9 +93,11 @@ _current_cluster_datadir() {
 	printf '%s\n' "$d"
 }
 
-# Ubuntu self-heal preflight: detect and repair broken default cluster safely.
+# Ubuntu self-heal preflight: detect and repair broken default cluster safely
 # Non-destructive: never delete a directory that looks like valid PGDATA.
 _ubuntu_self_heal_cluster() {
+	log "Ubuntu self-heal preflight: scanning ${PG_VERSION}/main"
+
 	local conf="/etc/postgresql/${PG_VERSION}/main/postgresql.conf"
 	local etcdir="/etc/postgresql/${PG_VERSION}/main"
 	local datadir
@@ -208,6 +210,18 @@ _ubuntu_self_heal_cluster() {
 		reason+=("missing postgresql.conf")
 	fi
 
+	for _cfg in "$conf" "$etcdir/pg_hba.conf" "$etcdir/pg_ident.conf"; do
+		if ! msg=$(_conf_readable_by_postgres "$_cfg"); then
+			soft_run "fix ownership $(basename "$_cfg")" "${SUDO[@]}" chown root:postgres -- "$_cfg"
+			soft_run "fix mode $(basename "$_cfg")" "${SUDO[@]}" chmod 0640 -- "$_cfg"
+			# re-check once
+			if ! msg2=$(_conf_readable_by_postgres "$_cfg"); then
+				broken="true"
+				reason+=("$msg2")
+			fi
+		fi
+	done
+
 	# 4) Resolve datadir if unknown.
 	if [[ -z "$datadir" && -r "$conf" ]]; then
 		datadir=$(awk -F= '/^[[:space:]]*data_directory[[:space:]]*=/{gsub(/[#"].*$/,"",$2); gsub(/^[[:space:]]+|[[:space:]]+$/,"",$2); print $2; exit}' "$conf")
@@ -268,6 +282,25 @@ _ubuntu_self_heal_cluster() {
 
 	[[ "$broken" != "true" ]] && return 0
 	warn "Ubuntu self-heal: detected broken cluster (${reason[*]})"
+
+	# 8) Quarantine *out of /etc/postgresql* if: no row, etcdir exists, and datadir is missing/invalid
+	local datadir_bad="false"
+	if [[ -z "$datadir" || ! -d "$datadir" ]]; then
+		datadir_bad="true"
+	elif ! _is_valid_pgdata "$datadir"; then
+		datadir_bad="true"
+	fi
+
+	local quarantine
+
+	if [[ "$broken" == "true" && -d "$etcdir" && -z "$has_row" && "$datadir_bad" == "true" ]]; then
+		quarantine="${etcdir}.broken.$(date +%s)"
+		must_run "quarantine $etcdir -> $quarantine" "${SUDO[@]}" mv -T -- "$etcdir" "$quarantine"
+		log "Ubuntu self-heal: quarantined stale config dir; maintainer scripts won't probe ${PG_VERSION}/main"
+	fi
+
+	[[ "$broken" != "true" ]] && return 0
+	warn "Ubuntu self-heal: detected broken cluster (${reason[*]})"
 }
 
 os_init_cluster() {
@@ -278,6 +311,24 @@ os_init_cluster() {
 	# Run Ubuntu self-heal preflight (guarded; full logic planned)
 	if [[ "${SELF_HEAL:-true}" == "true" ]]; then
 		_ubuntu_self_heal_cluster || true
+	fi
+
+	local has_row=""
+	if command -v pg_lsclusters >/dev/null 2>&1; then
+		has_row=$(pg_lsclusters --no-header 2>/dev/null |
+			awk '$1=="'"${PG_VERSION}"'" && $2=="main"{print "yes"; exit}')
+	fi
+
+	if [[ "$data_dir" == "auto" ]]; then
+		if [[ -z "$has_row" ]]; then
+
+			local def="/var/lib/postgresql/${PG_VERSION}/main"
+			run "${SUDO[@]}" install -d -m 0700 -- "$def"
+			ubuntu_apparmor_allow_datadir "$def" || true
+			run "${SUDO[@]}" pg_createcluster "${PG_VERSION}" main -d "$def"
+		fi
+		os_enable_and_start "postgresql@${PG_VERSION}-main"
+		return 0
 	fi
 
 	if [[ "$data_dir" != "auto" && -n "$data_dir" ]]; then
