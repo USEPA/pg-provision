@@ -238,6 +238,63 @@ ______________________________________________________________________
   journalctl -xeu postgresql-16 --no-pager | tail -n 100
   ```
 
+______________________________________________________________________
+
+## 11) Self-heal: missing/invalid PGDATA (fresh create)
+
+```bash
+set -euxo pipefail
+PGV=16
+# Detect service name (PGDG vs AppStream)
+if systemctl list-unit-files --type=service | grep -q "^postgresql-${PGV}\.service"; then
+  SVC="postgresql-${PGV}"
+else
+  SVC="postgresql"
+fi
+
+# Simulate missing data dir
+systemctl stop "$SVC" 2>/dev/null || true
+rm -rf "/var/lib/pgsql/${PGV}/data"
+
+# Provisioner should create and start cleanly
+pgprovision --pg-version "${PGV}"
+systemctl is-active --quiet "$SVC"
+# Pick psql path gracefully
+PSQL="$(command -v psql || echo /usr/pgsql-${PGV}/bin/psql)"
+sudo -u postgres "$PSQL" -At -c "SELECT 1;"
+```
+
+______________________________________________________________________
+
+## 12) Self-heal: adopt existing valid PGDATA
+
+```bash
+set -euxo pipefail
+PGV=16
+# Detect service name (PGDG vs AppStream)
+if systemctl list-unit-files --type=service | grep -q "^postgresql-${PGV}\.service"; then
+  SVC="postgresql-${PGV}"
+else
+  SVC="postgresql"
+fi
+REAL_DATA="/var/lib/pgsql/${PGV}/adopt-me"
+
+# Prepare a valid PGDATA manually
+install -o postgres -g postgres -m 0700 -d "$REAL_DATA"
+INITDB="$(command -v initdb || echo /usr/pgsql-${PGV}/bin/initdb)"
+sudo -u postgres "$INITDB" -D "$REAL_DATA"
+
+# Remove any override so the service points to default initially
+rm -f "/etc/systemd/system/${SVC}.service.d/override.conf"
+systemctl daemon-reload || true
+
+# Run provisioner; expect adoption (override to REAL_DATA, service up)
+pgprovision --pg-version "${PGV}"
+systemctl is-active --quiet "$SVC"
+PSQL="$(command -v psql || echo /usr/pgsql-${PGV}/bin/psql)"
+sudo -u postgres "$PSQL" -At -c "SHOW data_directory;" | grep -Fx "$REAL_DATA"
+```
+
 - **SELinux AVC denials** (custom data dir):
 
   ```bash
