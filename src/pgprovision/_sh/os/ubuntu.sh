@@ -65,9 +65,20 @@ os_install_packages() {
 	run "${SUDO[@]}" apt-get install -y "postgresql-${PG_VERSION}" "postgresql-client-${PG_VERSION}" postgresql-contrib
 }
 
+#pgdata is valid if:
+#1.) Directory exists.
+#2.) Version marker exists.
+#3.) Control file exists.
+
 _is_valid_pgdata() {
 	local d="${1:?}"
-	[[ -d "$d" && -f "$d/PG_VERSION" && -f "$d/global/pg_control" ]]
+	[[ -d "$d" ]] || return 1
+	[[ -f "$d/PG_VERSION" ]] || return 1
+	[[ -d "$d/global" && -f "$d/global/pg_control" ]] || return 1
+	[[ -d "$d/base" ]] || return 1
+	# Accept either wal dir (>=10) or xlog (<10); allow symlinked WAL
+	[[ -d "$d/pg_wal" || -L "$d/pg_wal" || -d "$d/pg_xlog" || -L "$d/pg_xlog" ]] || return 1
+	return 0
 }
 
 _current_cluster_datadir() {
@@ -86,87 +97,176 @@ _current_cluster_datadir() {
 # Non-destructive: never delete a directory that looks like valid PGDATA.
 _ubuntu_self_heal_cluster() {
 	local conf="/etc/postgresql/${PG_VERSION}/main/postgresql.conf"
-	local datadir reason=() broken="false"
+	local etcdir="/etc/postgresql/${PG_VERSION}/main"
+	local datadir
+	local reason=()
+	local broken="false"
+
 	datadir="$(_current_cluster_datadir)"
 
-	# Detect haunted metadata
+	# 0) pg_lsclusters must run cleanly.
 	if ! pg_lsclusters >/dev/null 2>&1; then
 		broken="true"
 		reason+=("pg_lsclusters error")
 	fi
-	# No cluster rows and no metadata dir → treat as broken (packaging failed to create main)
+
+	# 1) Does a ${PG_VERSION}/main row exist?
 	local has_row=""
 	if command -v pg_lsclusters >/dev/null 2>&1; then
-		has_row=$(pg_lsclusters --no-header 2>/dev/null | awk '$1=="'"${PG_VERSION}"'" && $2=="main"{print "yes"; exit}')
+		# Try JSON first (less brittle); fallback to awk
+		if pg_lsclusters --json >/dev/null 2>&1; then
+			has_row=$(pg_lsclusters --json 2>/dev/null | perl -0777 -ne \
+				'print "yes" if /"version"\s*:\s*"'"${PG_VERSION//./\.}"'"\s*,\s*"cluster"\s*:\s*"main"/')
+		else
+			has_row=$(pg_lsclusters --no-header 2>/dev/null |
+				awk '$1=="'"${PG_VERSION}"'" && $2=="main"{print "yes"; exit}')
+		fi
 	fi
-	if [[ -z "$has_row" && ! -e "/etc/postgresql/${PG_VERSION}/main" ]]; then
+	[[ -z "$has_row" ]] && {
 		broken="true"
-		reason+=("no ${PG_VERSION}/main cluster")
-	fi
-	if [[ -r "$conf" ]]; then
-		local owner group
+		reason+=("no cluster row ${PG_VERSION}/main")
+	}
+
+	# 2) Config directory must exist.
+	[[ ! -d "$etcdir" ]] && {
+		broken="true"
+		reason+=("missing $etcdir")
+	}
+
+	# 3) postgresql.conf/hba/ident must exist and be readable by 'postgres'.
+	# returns 0 if file exists and is readable by postgres; prints a reason on failure
+	_conf_readable_by_postgres() {
+		local f="${1:?}"
+		[[ -e "$f" ]] || {
+			echo "missing $(basename "$f")"
+			return 1
+		}
+
+		# Try to check as the postgres user when possible
+		if command -v runuser >/dev/null 2>&1; then
+			runuser -u postgres -- test -r "$f" && return 0
+		elif command -v sudo >/dev/null 2>&1; then
+			sudo -n -u postgres test -r "$f" 2>/dev/null && return 0
+		elif id postgres >/dev/null 2>&1; then
+			su -s /bin/sh -c "test -r \"$f\"" postgres 2>/dev/null && return 0
+		fi
+
+		# Fallback: infer via mode bits
+		local owner group mode om
+		owner=$(stat -c '%U' -- "$f" 2>/dev/null || echo "")
+		group=$(stat -c '%G' -- "$f" 2>/dev/null || echo "")
+		mode=$(stat -c '%a' -- "$f" 2>/dev/null || echo "")
+		[[ -z "$mode" ]] && {
+			echo "$(basename "$f") unreadable (stat failed)"
+			return 1
+		}
+		om=$((8#$mode)) # interpret as octal
+
+		# readable if owner==postgres with 0400, or group==postgres with 0040, or world 0004
+		if { [[ "$owner" == "postgres" ]] && ((om & 0400)); } ||
+			{ [[ "$group" == "postgres" ]] && ((om & 0040)); } ||
+			((om & 0004)); then
+			# soft warning for unsafe write bits (don’t fail the heal)
+			if ((om & 0022)); then
+				warn "$(basename "$f") is group/other-writable (mode $mode)"
+			fi
+			return 0
+		fi
+
+		echo "$(basename "$f") not readable by postgres (owner=$owner group=$group mode=$mode)"
+		return 1
+	}
+
+	if [[ -e "$conf" ]]; then
+		local owner
+		local group
+		local mode
 		owner=$(stat -c '%U' -- "$conf" 2>/dev/null || echo "")
 		group=$(stat -c '%G' -- "$conf" 2>/dev/null || echo "")
-		[[ "$owner:$group" != "postgres:postgres" ]] && {
+		mode=$(stat -c '%a' -- "$conf" 2>/dev/null || echo "")
+
+		# At least one of: owner==postgres OR group==postgres (with group read)
+		if [[ "$owner" != "postgres" && "$group" != "postgres" ]]; then
 			broken="true"
-			reason+=("conf owner root")
-		}
-		[[ -n "$datadir" && ! -d "$datadir" ]] && {
+			reason+=("conf owner/group not postgres ($owner:$group)")
+		fi
+		_conf_readable_by_postgres "$conf" || {
 			broken="true"
-			reason+=("missing data_directory")
+			reason+=("$(_conf_readable_by_postgres "$conf")")
 		}
+		_conf_readable_by_postgres "$etcdir/pg_hba.conf" || {
+			broken="true"
+			reason+=("pg_hba unreadable")
+		}
+		_conf_readable_by_postgres "$etcdir/pg_ident.conf" || {
+			broken="true"
+			reason+=("pg_ident unreadable")
+		}
+	else
+		broken="true"
+		reason+=("missing postgresql.conf")
 	fi
-	if [[ -n "$datadir" && -d "$datadir" ]]; then
-		if ! _is_valid_pgdata "$datadir"; then
+
+	# 4) Resolve datadir if unknown.
+	if [[ -z "$datadir" && -r "$conf" ]]; then
+		datadir=$(awk -F= '/^[[:space:]]*data_directory[[:space:]]*=/{gsub(/[#"].*$/,"",$2); gsub(/^[[:space:]]+|[[:space:]]+$/,"",$2); print $2; exit}' "$conf")
+		[[ -z "$datadir" ]] && datadir="/var/lib/postgresql/${PG_VERSION}/main"
+	fi
+
+	# 5) PGDATA existence/ownership/mode/layout/version
+	if [[ -n "$datadir" ]]; then
+		if [[ ! -d "$datadir" ]]; then
 			broken="true"
-			reason+=("invalid PGDATA layout")
+			reason+=("missing data_directory: $datadir")
+		else
+			local d_owner
+			local d_group
+			local d_mode
+			d_owner=$(stat -c '%U' -- "$datadir" 2>/dev/null || echo "")
+			d_group=$(stat -c '%G' -- "$datadir" 2>/dev/null || echo "")
+			d_mode=$(stat -c '%a' -- "$datadir" 2>/dev/null || echo "")
+			[[ "$d_owner:$d_group" != "postgres:postgres" ]] && {
+				broken="true"
+				reason+=("PGDATA owner not postgres ($d_owner:$d_group)")
+			}
+			case "$d_mode" in 700 | 750) : ;; *)
+				broken="true"
+				reason+=("PGDATA mode $d_mode (expect 700/750)")
+				;;
+			esac
+			if ! _is_valid_pgdata "$datadir"; then
+				broken="true"
+				reason+=("invalid PGDATA layout")
+			elif [[ -f "$datadir/PG_VERSION" ]]; then
+				local on_disk_ver
+				on_disk_ver=$(tr -d '\n' <"$datadir/PG_VERSION" 2>/dev/null)
+				[[ -n "$on_disk_ver" && "$on_disk_ver" != "$PG_VERSION" ]] && {
+					broken="true"
+					reason+=("PG_VERSION mismatch: $on_disk_ver != $PG_VERSION")
+				}
+			fi
 		fi
 	fi
+
+	# 6) systemd generator / start.conf sanity
+	local startconf="$etcdir/start.conf"
+	if [[ -e "$startconf" ]]; then
+		local startmode
+		startmode=$(awk '{print $1; exit}' "$startconf" 2>/dev/null)
+		[[ "$startmode" != "auto" && "$startmode" != "manual" ]] && {
+			broken="true"
+			reason+=("bad start.conf")
+		}
+	fi
+
+	# 7) server binary presence
+	[[ ! -x "/usr/lib/postgresql/${PG_VERSION}/bin/postgres" ]] && {
+		broken="true"
+		reason+=("server binary missing")
+	}
+
 	[[ "$broken" != "true" ]] && return 0
 	warn "Ubuntu self-heal: detected broken cluster (${reason[*]})"
-
-	# Stop service safely
-	os_stop "postgresql@${PG_VERSION}-main" || true
-
-	local target real="${datadir:-}"
-	if [[ -n "$real" ]] && _is_valid_pgdata "$real"; then
-		# ADOPT existing valid PGDATA (non-destructive): rebuild metadata only
-		target="$real"
-		# Remove stale metadata if present
-		if [[ -d "/etc/postgresql/${PG_VERSION}/main" ]]; then
-			run "${SUDO[@]}" rm -rf "/etc/postgresql/${PG_VERSION}/main"
-		fi
-		local tmp="/var/lib/postgresql/${PG_VERSION}/tmp-adopt.$$"
-		run "${SUDO[@]}" install -d -m 0700 -- "$tmp"
-		run "${SUDO[@]}" pg_createcluster "${PG_VERSION}" main -d "$tmp"
-		ubuntu_apparmor_allow_datadir "$target" || true
-		local target_lit
-		target_lit=$(printf '%s' "$target" | sed "s/'/''/g")
-		# Use shared helper to replace or append the setting consistently
-		write_key_value_dropin "$conf" data_directory "'${target_lit}'"
-		run "${SUDO[@]}" rm -rf -- "$tmp"
-	else
-		# No valid data: safe to drop stale metadata and recreate fresh
-		run "${SUDO[@]}" pg_dropcluster --stop "${PG_VERSION}" main || true
-		# Ensure metadata is gone
-		if [[ -d "/etc/postgresql/${PG_VERSION}/main" ]]; then
-			run "${SUDO[@]}" rm -rf "/etc/postgresql/${PG_VERSION}/main"
-		fi
-		target="/var/lib/postgresql/${PG_VERSION}/main"
-		if [[ "${DATA_DIR:-auto}" != "auto" && -n "${DATA_DIR}" ]]; then
-			target="${DATA_DIR}"
-		fi
-		run "${SUDO[@]}" install -d -m 0700 -- "$target"
-		ubuntu_apparmor_allow_datadir "$target" || true
-		run "${SUDO[@]}" pg_createcluster "${PG_VERSION}" main -d "$target"
-	fi
-
-	# Ensure config ownership and start
-	if [[ -d "/etc/postgresql/${PG_VERSION}/main" ]]; then
-		run "${SUDO[@]}" chown -R postgres:postgres "/etc/postgresql/${PG_VERSION}/main"
-	fi
-	os_enable_and_start "postgresql@${PG_VERSION}-main"
-	log "Ubuntu self-heal: ensured ${PG_VERSION}/main is healthy (data=${target})"
 }
 
 os_init_cluster() {
