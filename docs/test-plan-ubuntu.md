@@ -14,6 +14,12 @@ ______________________________________________________________________
   pip install pg-provision
   # sanity
   pgprovision --help
+
+  or
+
+  python -m venv .venv && . .venv/bin/activate
+  python -m pip install -e .
+  pgprovision --dry-run
 ```
 
 **Recommended shell setup**
@@ -320,4 +326,55 @@ sudo -u postgres psql -At -c "SHOW listen_addresses;" | grep -Fx 'localhost'
 # 7) Cluster identity unchanged ⇒ no reinit
 sysid_after=$(sudo -u postgres psql -At -c "SELECT system_identifier FROM pg_control_system();")
 test "$sysid_before" = "$sysid_after"
+```
+
+______________________________________________________________________
+
+## 11) Self-heal: broken metadata, missing datadir
+
+```bash
+set -euxo pipefail
+PGV=16
+UNIT="postgresql@${PGV}-main"
+sudo systemctl stop "$UNIT" 2>/dev/null || true
+
+# Simulate the mess: config exists (wrong owner), data dir missing
+sudo install -d -m 0700 -o root -g root "/etc/postgresql/${PGV}/main"
+echo "# minimal" | sudo tee "/etc/postgresql/${PGV}/main/postgresql.conf" >/dev/null
+sudo rm -rf "/var/lib/postgresql/${PGV}/main"
+
+# Should self-heal without manual steps (default behavior):
+sudo pgprovision --pg-version "${PGV}"
+
+# Validate: cluster present, service up, conf owned by postgres
+pg_lsclusters
+systemctl is-active --quiet "$UNIT"
+stat -c '%U:%G' "/etc/postgresql/${PGV}/main/postgresql.conf" | grep -Fx 'postgres:postgres'
+sudo -u postgres psql -At -c "SELECT 1;"
+```
+
+______________________________________________________________________
+
+## 12) Self-heal: adopt existing valid PGDATA
+
+```bash
+set -euxo pipefail
+PGV=16
+UNIT="postgresql@${PGV}-main"
+REAL_DATA="/var/lib/postgresql/${PGV}/adopt-me"
+
+# Prepare a valid PGDATA manually
+sudo install -d -m 0700 -o postgres -g postgres "$REAL_DATA"
+/usr/lib/postgresql/${PGV}/bin/initdb -D "$REAL_DATA" -U postgres
+
+# Remove metadata to simulate haunted state
+sudo systemctl stop "$UNIT" 2>/dev/null || true
+sudo rm -rf "/etc/postgresql/${PGV}/main"
+
+# Run provisioner; expect adoption (metadata rebuilt to point at REAL_DATA)
+sudo pgprovision --pg-version "${PGV}"
+
+# Validate: service up and we can connect
+systemctl is-active --quiet "$UNIT"
+sudo -u postgres psql -At -c "SELECT 1;"
 ```
