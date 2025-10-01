@@ -100,51 +100,63 @@ _ubuntu_self_heal_cluster() {
 
 	local conf="/etc/postgresql/${PG_VERSION}/main/postgresql.conf"
 	local etcdir="/etc/postgresql/${PG_VERSION}/main"
-	local datadir
-	local reason=()
-	local broken="false"
+	local verdir="/etc/postgresql/${PG_VERSION}"
+	local quarantine_root="/var/lib/postgresql/.pgprovision-quarantine"
+	local datadir reason=() broken="false"
+
+	# Ensure quarantine root exists (outside /etc/postgresql)
+	run "${SUDO[@]}" install -d -m 0700 -- "$quarantine_root"
+
+	# --- Sweep leftovers from previous runs: move any *.broken.* OUT of verdir ---
+	if [[ -d "$verdir" ]]; then
+		local d base dest ts
+		shopt -s nullglob
+		for d in "$verdir"/*.broken.*; do
+			[[ -d "$d" ]] || continue
+			base=$(basename -- "$d")
+			ts=$(date +%s)
+			dest="${quarantine_root}/${PG_VERSION}-${base}-${ts}"
+			must_run "quarantine leftover $base -> $dest" "${SUDO[@]}" mv -- "$d" "$dest"
+		done
+		shopt -u nullglob
+	fi
+	# ---------------------------------------------------------------------------
 
 	datadir="$(_current_cluster_datadir)"
 
-	# 0) pg_lsclusters must run cleanly.
-	if ! pg_lsclusters >/dev/null 2>&1; then
-		broken="true"
-		reason+=("pg_lsclusters error")
+	# 0) pg_lsclusters must run cleanly (ok to mark broken if missing)
+	if command -v pg_lsclusters >/dev/null 2>&1; then
+		if ! pg_lsclusters >/dev/null 2>&1; then
+			broken="true"
+			reason+=("pg_lsclusters error")
+		fi
 	fi
 
 	# 1) Does a ${PG_VERSION}/main row exist?
 	local has_row=""
 	if command -v pg_lsclusters >/dev/null 2>&1; then
-		# Try JSON first (less brittle); fallback to awk
-		if pg_lsclusters --json >/dev/null 2>&1; then
-			has_row=$(pg_lsclusters --json 2>/dev/null | perl -0777 -ne \
-				'print "yes" if /"version"\s*:\s*"'"${PG_VERSION//./\.}"'"\s*,\s*"cluster"\s*:\s*"main"/')
-		else
-			has_row=$(pg_lsclusters --no-header 2>/dev/null |
-				awk '$1=="'"${PG_VERSION}"'" && $2=="main"{print "yes"; exit}')
-		fi
+		# Prefer the column output; it's stable across releases.
+		has_row=$(pg_lsclusters --no-header 2>/dev/null |
+			awk -v v="$PG_VERSION" '$1==v && $2=="main"{print "yes"; exit}')
+		[[ -z "$has_row" ]] && {
+			broken="true"
+			reason+=("no cluster row ${PG_VERSION}/main")
+		}
 	fi
-	[[ -z "$has_row" ]] && {
-		broken="true"
-		reason+=("no cluster row ${PG_VERSION}/main")
-	}
 
-	# 2) Config directory must exist.
+	# 2) Config directory must exist
 	[[ ! -d "$etcdir" ]] && {
 		broken="true"
 		reason+=("missing $etcdir")
 	}
 
-	# 3) postgresql.conf/hba/ident must exist and be readable by 'postgres'.
-	# returns 0 if file exists and is readable by postgres; prints a reason on failure
-	_conf_readable_by_postgres() {
+	# 3) Validate/repair config readability (only if files exist)
+	_conf_readable_by_postgres() { # unchanged logic from your version
 		local f="${1:?}"
 		[[ -e "$f" ]] || {
 			echo "missing $(basename "$f")"
 			return 1
 		}
-
-		# Try to check as the postgres user when possible
 		if command -v runuser >/dev/null 2>&1; then
 			runuser -u postgres -- test -r "$f" && return 0
 		elif command -v sudo >/dev/null 2>&1; then
@@ -152,8 +164,6 @@ _ubuntu_self_heal_cluster() {
 		elif id postgres >/dev/null 2>&1; then
 			su -s /bin/sh -c "test -r \"$f\"" postgres 2>/dev/null && return 0
 		fi
-
-		# Fallback: infer via mode bits
 		local owner group mode om
 		owner=$(stat -c '%U' -- "$f" 2>/dev/null || echo "")
 		group=$(stat -c '%G' -- "$f" 2>/dev/null || echo "")
@@ -162,116 +172,90 @@ _ubuntu_self_heal_cluster() {
 			echo "$(basename "$f") unreadable (stat failed)"
 			return 1
 		}
-		om=$((8#$mode)) # interpret as octal
-
-		# readable if owner==postgres with 0400, or group==postgres with 0040, or world 0004
+		om=$((8#$mode))
 		if { [[ "$owner" == "postgres" ]] && ((om & 0400)); } ||
 			{ [[ "$group" == "postgres" ]] && ((om & 0040)); } ||
 			((om & 0004)); then
-			# soft warning for unsafe write bits (don’t fail the heal)
-			if ((om & 0022)); then
-				warn "$(basename "$f") is group/other-writable (mode $mode)"
-			fi
+			((om & 0022)) && warn "$(basename "$f") group/other-writable (mode $mode)"
 			return 0
 		fi
-
 		echo "$(basename "$f") not readable by postgres (owner=$owner group=$group mode=$mode)"
 		return 1
 	}
 
-	if [[ -e "$conf" ]]; then
-		local owner
-		local group
-		local mode
-		owner=$(stat -c '%U' -- "$conf" 2>/dev/null || echo "")
-		group=$(stat -c '%G' -- "$conf" 2>/dev/null || echo "")
-		mode=$(stat -c '%a' -- "$conf" 2>/dev/null || echo "")
-
-		# Diagnostic only: log unusual owner/group, but don't fail on it.
-		if [[ "$owner" != "postgres" && "$group" != "postgres" ]]; then
-			warn "conf owner/group not postgres ($owner:$group); relying on readability check"
-		fi
-
-		local f
-		local msg
-		local rc
-
+	if [[ -d "$etcdir" ]]; then
+		local f msg rc
 		for f in "$conf" "$etcdir/pg_hba.conf" "$etcdir/pg_ident.conf"; do
+			if [[ ! -e "$f" ]]; then
+				broken="true"
+				reason+=("missing $(basename "$f")")
+				continue
+			fi
 			msg=$(_conf_readable_by_postgres "$f")
 			rc=$?
 			if ((rc != 0)); then
-				broken="true"
-				reason+=("$msg")
+				# safe Debian-ish repair; re-check once
+				soft_run "fix ownership $(basename "$f")" "${SUDO[@]}" chown root:postgres -- "$f"
+				soft_run "fix mode $(basename "$f")" "${SUDO[@]}" chmod 0640 -- "$f"
+				if ! msg=$(_conf_readable_by_postgres "$f"); then
+					broken="true"
+					reason+=("$msg")
+				fi
 			fi
 		done
-
-	else
-		broken="true"
-		reason+=("missing postgresql.conf")
 	fi
 
-	for _cfg in "$conf" "$etcdir/pg_hba.conf" "$etcdir/pg_ident.conf"; do
-		if ! msg=$(_conf_readable_by_postgres "$_cfg"); then
-			soft_run "fix ownership $(basename "$_cfg")" "${SUDO[@]}" chown root:postgres -- "$_cfg"
-			soft_run "fix mode $(basename "$_cfg")" "${SUDO[@]}" chmod 0640 -- "$_cfg"
-			# re-check once
-			if ! msg2=$(_conf_readable_by_postgres "$_cfg"); then
-				broken="true"
-				reason+=("$msg2")
-			fi
-		fi
-	done
-
-	# 4) Resolve datadir if unknown.
+	# 4) Resolve datadir if unknown
 	if [[ -z "$datadir" && -r "$conf" ]]; then
 		datadir=$(awk -F= '/^[[:space:]]*data_directory[[:space:]]*=/{gsub(/[#"].*$/,"",$2); gsub(/^[[:space:]]+|[[:space:]]+$/,"",$2); print $2; exit}' "$conf")
 		[[ -z "$datadir" ]] && datadir="/var/lib/postgresql/${PG_VERSION}/main"
 	fi
 
-	# 5) PGDATA existence/ownership/mode/layout/version
-	if [[ -n "$datadir" ]]; then
-		if [[ ! -d "$datadir" ]]; then
+	# 5) PGDATA sanity (owner/mode/layout/version)
+	if [[ -n "$datadir" && -d "$datadir" ]]; then
+		local d_owner d_group d_mode
+		d_owner=$(stat -c '%U' -- "$datadir" 2>/dev/null || echo "")
+		d_group=$(stat -c '%G' -- "$datadir" 2>/dev/null || echo "")
+		d_mode=$(stat -c '%a' -- "$datadir" 2>/dev/null || echo "")
+		[[ "$d_owner:$d_group" != "postgres:postgres" ]] && {
 			broken="true"
-			reason+=("missing data_directory: $datadir")
-		else
-			local d_owner
-			local d_group
-			local d_mode
-			d_owner=$(stat -c '%U' -- "$datadir" 2>/dev/null || echo "")
-			d_group=$(stat -c '%G' -- "$datadir" 2>/dev/null || echo "")
-			d_mode=$(stat -c '%a' -- "$datadir" 2>/dev/null || echo "")
-			[[ "$d_owner:$d_group" != "postgres:postgres" ]] && {
+			reason+=("PGDATA owner not postgres ($d_owner:$d_group)")
+		}
+		case "$d_mode" in 700 | 750) : ;; *)
+			broken="true"
+			reason+=("PGDATA mode $d_mode (expect 700/750)")
+			;;
+		esac
+		if ! _is_valid_pgdata "$datadir"; then
+			broken="true"
+			reason+=("invalid PGDATA layout")
+		elif [[ -f "$datadir/PG_VERSION" ]]; then
+			local on_disk_ver
+			on_disk_ver=$(tr -d '\n' <"$datadir/PG_VERSION" 2>/dev/null)
+			[[ -n "$on_disk_ver" && "$on_disk_ver" != "$PG_VERSION" ]] && {
 				broken="true"
-				reason+=("PGDATA owner not postgres ($d_owner:$d_group)")
+				reason+=("PG_VERSION mismatch: $on_disk_ver != $PG_VERSION")
 			}
-			case "$d_mode" in 700 | 750) : ;; *)
-				broken="true"
-				reason+=("PGDATA mode $d_mode (expect 700/750)")
-				;;
-			esac
-			if ! _is_valid_pgdata "$datadir"; then
-				broken="true"
-				reason+=("invalid PGDATA layout")
-			elif [[ -f "$datadir/PG_VERSION" ]]; then
-				local on_disk_ver
-				on_disk_ver=$(tr -d '\n' <"$datadir/PG_VERSION" 2>/dev/null)
-				[[ -n "$on_disk_ver" && "$on_disk_ver" != "$PG_VERSION" ]] && {
-					broken="true"
-					reason+=("PG_VERSION mismatch: $on_disk_ver != $PG_VERSION")
-				}
-			fi
 		fi
+	elif [[ -n "$datadir" && ! -d "$datadir" ]]; then
+		broken="true"
+		reason+=("missing data_directory: $datadir")
 	fi
 
 	# 6) systemd generator / start.conf sanity
 	local startconf="$etcdir/start.conf"
 	if [[ -e "$startconf" ]]; then
+		# First non-comment, non-blank token
 		local startmode
-		startmode=$(awk '{print $1; exit}' "$startconf" 2>/dev/null)
-		[[ "$startmode" != "auto" && "$startmode" != "manual" ]] && {
+		startmode=$(awk 'BEGIN{FS="[ \t]+"} /^[[:space:]]*(#|$)/{next} {print $1; exit}' \
+			"$startconf" 2>/dev/null)
+		case "$startmode" in
+		auto | manual | disabled) : ;;
+		*)
 			broken="true"
-			reason+=("bad start.conf")
-		}
+			reason+=("bad start.conf${startmode:+: $startmode}")
+			;;
+		esac
 	fi
 
 	# 7) server binary presence
@@ -280,8 +264,8 @@ _ubuntu_self_heal_cluster() {
 		reason+=("server binary missing")
 	}
 
+	# --- Early exit if all good ---
 	[[ "$broken" != "true" ]] && return 0
-	warn "Ubuntu self-heal: detected broken cluster (${reason[*]})"
 
 	# 8) Quarantine *out of /etc/postgresql* if: no row, etcdir exists, and datadir is missing/invalid
 	local datadir_bad="false"
@@ -291,15 +275,16 @@ _ubuntu_self_heal_cluster() {
 		datadir_bad="true"
 	fi
 
-	local quarantine
-
-	if [[ "$broken" == "true" && -d "$etcdir" && -z "$has_row" && "$datadir_bad" == "true" ]]; then
-		quarantine="${etcdir}.broken.$(date +%s)"
-		must_run "quarantine $etcdir -> $quarantine" "${SUDO[@]}" mv -T -- "$etcdir" "$quarantine"
-		log "Ubuntu self-heal: quarantined stale config dir; maintainer scripts won't probe ${PG_VERSION}/main"
+	if [[ -z "$has_row" && -d "$etcdir" && "$datadir_bad" == "true" ]]; then
+		local stamp dest
+		stamp=$(date +%s)
+		dest="${quarantine_root}/${PG_VERSION}-main-${stamp}"
+		must_run "quarantine $etcdir -> $dest" "${SUDO[@]}" mv -T -- "$etcdir" "$dest"
+		log "Ubuntu self-heal: quarantined stale /etc/postgresql/${PG_VERSION}/main -> $dest"
+		# Make sure verdir exists (postinst may create it anyway)
+		run "${SUDO[@]}" install -d -m 0755 -- "$verdir"
 	fi
 
-	[[ "$broken" != "true" ]] && return 0
 	warn "Ubuntu self-heal: detected broken cluster (${reason[*]})"
 }
 
@@ -307,11 +292,6 @@ os_init_cluster() {
 	local data_dir="${1:-auto}"
 	# Ubuntu auto-creates the default cluster when postgresql-${PG_VERSION} is installed via PGDG.
 	# A custom data dir requires cluster tooling.
-
-	# Run Ubuntu self-heal preflight (guarded; full logic planned)
-	if [[ "${SELF_HEAL:-true}" == "true" ]]; then
-		_ubuntu_self_heal_cluster || true
-	fi
 
 	local has_row=""
 	if command -v pg_lsclusters >/dev/null 2>&1; then
