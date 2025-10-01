@@ -637,6 +637,14 @@ main() {
 	os_detect
 	load_os_module
 
+	if [[ "${SELF_HEAL:-true}" == "true" ]]; then
+		if [[ "${OS_FAMILY}" == "ubuntu" ]]; then
+			_ubuntu_self_heal_cluster || true
+		elif [[ "${OS_FAMILY}" == "rhel" ]]; then
+			_rhel_self_heal_cluster || true
+		fi
+	fi
+
 	log "Provisioning PostgreSQL ${PG_VERSION} on ${OS_FAMILY} (repo=${REPO_KIND})"
 	if [[ "$DRY_RUN" == "true" ]]; then
 		log "Dry-run: would prepare repos, install packages, and configure"

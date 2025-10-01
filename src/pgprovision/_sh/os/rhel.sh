@@ -55,7 +55,13 @@ _rhel_selinux_label_datadir() {
 
 _is_valid_pgdata() {
 	local d="${1:?}"
-	[[ -d "$d" && -f "$d/PG_VERSION" && -f "$d/global/pg_control" ]]
+	[[ -d "$d" ]] || return 1
+	[[ -f "$d/PG_VERSION" ]] || return 1
+	[[ -d "$d/global" && -f "$d/global/pg_control" ]] || return 1
+	[[ -d "$d/base" ]] || return 1
+	# Accept either wal dir (>=10) or xlog (<10); allow symlinked WAL
+	[[ -d "$d/pg_wal" || -L "$d/pg_wal" || -d "$d/pg_xlog" || -L "$d/pg_xlog" ]] || return 1
+	return 0
 }
 
 _rhel_current_pgdata() {
@@ -72,6 +78,12 @@ _rhel_current_pgdata() {
 _rhel_self_heal_cluster() {
 	local svc cur def reason=() broken="false"
 	svc="$(_rhel_service_name)"
+
+	# If the service unit isn't present yet, there's nothing to heal—return quietly.
+	if ! systemctl cat "$svc" >/dev/null 2>&1; then
+		return 0
+	fi
+
 	cur="$(_rhel_current_pgdata)"
 	def="$(_rhel_default_pgdata_for_service)"
 
